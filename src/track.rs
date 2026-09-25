@@ -25,6 +25,8 @@ pub struct Track {
     pub box_pos: Vec<V2>,
     pub coin_pos: Vec<V2>,
     pub pad_ranges: Vec<(usize, usize)>,
+    /// Scenery along the outside of the track (3D view only).
+    pub trees: Vec<V2>,
     pub min: V2,
     pub max: V2,
     origin: V2,
@@ -145,7 +147,21 @@ impl Track {
             let i = (k * n / 60 + n / 120) % n;
             coin_pos.push(pts[i] + tang[i].right() * (45.0 * (k as f32 * 0.55).sin()));
         }
-        Track { pts, n, tang, box_pos, coin_pos, pad_ranges, min: mn, max: mx, origin, gw, gh, dist, near }
+        let mut t = Track { pts, n, tang, box_pos, coin_pos, pad_ranges, trees: Vec::new(), min: mn, max: mx, origin, gw, gh, dist, near };
+        let mut trees = Vec::new();
+        for i in (0..n).step_by(5) {
+            for side in [-1.0f32, 1.0] {
+                for (row, off) in [HALF_W + GRASS_W + 8.0, HALF_W + GRASS_W + 50.0].into_iter().enumerate() {
+                    let jitter = ((i * 7 + row * 13) % 17) as f32 - 8.0;
+                    let p = t.pts[i] + t.tang[i].right() * (side * (off + jitter)) + t.tang[i] * jitter;
+                    if t.dist_at(p) >= HALF_W + GRASS_W + 2.0 {
+                        trees.push(p);
+                    }
+                }
+            }
+        }
+        t.trees = trees;
+        t
     }
 
     /// Centerline point (wrapping index).

@@ -128,9 +128,10 @@ fn encode_snapshot(gs: &GameState, seq: u32, your_id: usize) -> Vec<u8> {
         }
         w.u8(k.drift_dir as u8);
         w.u8(k.drift_tier());
-        for t in [k.boost, k.star, k.giant, k.shrunk, k.inked, k.rocket, k.spin] {
+        for t in [k.boost, k.star, k.giant, k.shrunk, k.inked, k.rocket] {
             w.timer(t);
         }
+        w.u8((k.spin * 100.0).clamp(0.0, 255.0) as u8);
         for s in k.slots {
             w.u8(s.0);
             w.u8(s.1);
@@ -195,7 +196,7 @@ fn decode_snapshot(mut r: R, gs: &mut GameState) -> Option<(u32, usize)> {
         k.shrunk = r.timer()?;
         k.inked = r.timer()?;
         k.rocket = r.timer()?;
-        k.spin = r.timer()?;
+        k.spin = r.u8()? as f32 / 100.0;
         for s in 0..2 {
             k.slots[s] = (r.u8()?, r.u8()?);
         }

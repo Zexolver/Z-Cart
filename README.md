@@ -1,7 +1,7 @@
 # Z-Cart
 
 A top-down kart racer in Rust with peer-hosted LAN play over **IPv6 link-local** addresses.
-Software-rendered (no GPU engine); no admin/sudo needed on Linux or Windows.
+Two views, both software-rendered (no GPU engine): a 3D chase camera (default) and the original 2D top-down view. Switch with **V** on the title screen or **C** in game; no admin/sudo needed on Linux or Windows.
 
 Dependencies: `minifb` (window), `if-addrs` (interface list), `font8x8` (font data). Networking is `std::net` only.
 
@@ -62,3 +62,8 @@ view is scaled to fit while keeping its aspect ratio.
 
 ## Packaging
 `scripts/package.sh` builds `dist/z-cart_<ver>_arm64.deb` and `dist/z-cart-amd64.exe` (cross-compiled with `zig cc` as linker).
+
+## Gameplay notes
+* Spin-outs are cosmetic: the kart whirls in place and always ends up facing the way it was going.
+* A flashing WRONG WAY warning appears when you're driving against the track direction.
+* Using a speed boost while driving onto a boost pad gives a brief extra burst of speed.

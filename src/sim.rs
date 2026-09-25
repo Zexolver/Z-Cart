@@ -183,6 +183,9 @@ pub struct Kart {
     pub rocket: f32,
     pub spin: f32,
     pub invuln: f32,
+    /// Brief extra speed for boosting onto a boost pad.
+    pub combo: f32,
+    pub on_pad: bool,
     /// (item id, uses left); id 0 = empty. Slot 0 is the primary.
     pub slots: [(u8, u8); 2],
     pub coins: u8,
@@ -216,6 +219,8 @@ impl Kart {
             rocket: 0.0,
             spin: 0.0,
             invuln: 0.0,
+            combo: 0.0,
+            on_pad: false,
             slots: [(0, 0); 2],
             coins: 0,
             run: 0,
@@ -249,6 +254,11 @@ impl Kart {
         self.star > 0.0 || self.giant > 0.0 || self.rocket > 0.0
     }
 
+    /// Heading as drawn: the physical heading plus the cosmetic spin-out.
+    pub fn visual_heading(&self) -> f32 {
+        self.heading + spin_angle(self.spin)
+    }
+
     pub fn speed(&self) -> f32 {
         self.vel.len()
     }
@@ -272,7 +282,7 @@ impl Kart {
         if self.smasher() || self.invuln > 0.0 || self.spin > 0.0 {
             return false;
         }
-        self.spin = if big { 1.8 } else { 1.3 };
+        self.spin = if big { 2.0 } else { 1.5 };
         self.invuln = self.spin + 0.8;
         self.vel = self.vel * 0.25;
         self.drift_dir = 0;
@@ -858,6 +868,13 @@ impl GameState {
     }
 }
 
+/// Cosmetic spin-out angle. It depends only on the time left and is a whole number of
+/// turns at both ends of a spin (durations are multiples of 0.5s), so a kart always
+/// comes out facing the way it went in.
+pub fn spin_angle(spin: f32) -> f32 {
+    spin * 4.0 * std::f32::consts::PI
+}
+
 /// Steering/throttle for bots, finished karts and rocket mode.
 pub fn autopilot(k: &Kart, tr: &Track, lane: f32, look: i32) -> Input {
     let ti = k.run + look;
@@ -916,9 +933,15 @@ fn drive(
         *t = (*t - DT).max(0.0);
     }
     let surf = tr.surface(k.pos);
-    if surf == Surf::Pad {
+    let on_pad = surf == Surf::Pad;
+    if on_pad {
+        if !k.on_pad && k.boost > 0.05 {
+            k.combo = 0.7;
+        }
         k.boost = k.boost.max(1.0);
     }
+    k.on_pad = on_pad;
+    k.combo = (k.combo - DT).max(0.0);
     let bot_handicap = if k.is_bot { 0.94 } else { 1.0 };
     let mut maxs = (360.0 + k.coins as f32 * 3.0) * bot_handicap;
     let boosting = k.boost > 0.0 || k.rocket > 0.0;
@@ -933,14 +956,16 @@ fn drive(
     }
     if boosting {
         maxs *= if k.rocket > 0.0 { 1.45 } else { 1.4 };
+        if k.combo > 0.0 {
+            maxs *= 1.12;
+        }
     }
 
     let fwd = V2::from_angle(k.heading);
     let mut vf = k.vel.dot(fwd);
 
     if k.spin > 0.0 {
-        k.spin -= DT;
-        k.heading += 12.0 * DT;
+        k.spin = (k.spin - DT).max(0.0);
         k.drift_dir = 0;
         k.drift_charge = 0.0;
         k.vel = k.vel * (1.0 - 2.5 * DT).max(0.0);
@@ -1072,5 +1097,58 @@ mod tests {
                 g.step(&tr);
             }
         }
+    }
+
+    #[test]
+    fn spinning_out_keeps_the_original_heading() {
+        let tr = Track::new();
+        let mut g = GameState::new(&tr);
+        g.add_human(&tr, "a");
+        g.start_race(&tr);
+        for _ in 0..300 {
+            g.step(&tr);
+        }
+        let before = g.karts[0].heading;
+        assert!(g.karts[0].hit(true));
+        for _ in 0..200 {
+            g.step(&tr);
+            assert_eq!(g.karts[0].heading, before, "heading must not change while spinning");
+        }
+        assert_eq!(g.karts[0].spin, 0.0);
+        assert!(spin_angle(2.0).rem_euclid(std::f32::consts::TAU) < 1e-3 || (spin_angle(2.0) - 8.0 * std::f32::consts::PI).abs() < 1e-3);
+    }
+
+    #[test]
+    fn boost_on_pad_gives_a_brief_combo() {
+        let tr = Track::new();
+        let mut k = Kart::new("a", false);
+        let pad = tr.pad_ranges[0].0 as i32 + 3;
+        let start = pad - 10;
+        k.pos = tr.pt(start);
+        k.run = start;
+        let t = tr.tangent(start);
+        k.heading = t.y.atan2(t.x);
+        k.boost = 2.0;
+        let mut fin = None;
+        let mut top = 0.0f32;
+        let mut plain = 0.0f32;
+        for _ in 0..90 {
+            let inp = autopilot(&k, &tr, 0.0, 14);
+            drive(&mut k, inp, &tr, 3, 0.0, &mut fin, true, 1e9);
+            top = top.max(k.speed());
+        }
+        // same run without the pad-entry boost
+        let mut k2 = Kart::new("b", false);
+        k2.pos = tr.pt(start - 200);
+        k2.run = start - 200;
+        let t = tr.tangent(start - 200);
+        k2.heading = t.y.atan2(t.x);
+        k2.boost = 2.0;
+        for _ in 0..40 {
+            let inp = autopilot(&k2, &tr, 0.0, 14);
+            drive(&mut k2, inp, &tr, 3, 0.0, &mut fin, true, 1e9);
+            plain = plain.max(k2.speed());
+        }
+        assert!(top > plain + 20.0, "combo {top} vs plain boost {plain}");
     }
 }

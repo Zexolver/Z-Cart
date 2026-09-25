@@ -1,7 +1,6 @@
 //! Software renderer: everything is drawn into a plain u32 framebuffer.
 
 use crate::math::*;
-use crate::net::byte_angle;
 use crate::sim::*;
 use crate::track::*;
 use font8x8::legacy::BASIC_LEGACY;
@@ -154,7 +153,7 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
-fn shade(c: u32, f: f32) -> u32 {
+pub fn shade(c: u32, f: f32) -> u32 {
     let ch = |s: u32| (((c >> s) & 255) as f32 * f).min(255.0) as u32;
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
@@ -189,6 +188,12 @@ impl Cam {
         (CX + d.dot(f.right()) * self.zoom, CY - d.dot(f) * self.zoom)
     }
 
+    /// Chase-camera variant: focus stays on the kart, yaw lags a little behind its heading.
+    pub fn follow3(&mut self, k: &Kart, dt: f32) {
+        self.ang += wrap_angle(k.heading - self.ang) * (1.0 - (-4.5 * dt).exp());
+        self.pos = k.pos;
+    }
+
     /// Ease the camera toward a kart.
     pub fn follow(&mut self, k: &Kart, dt: f32) {
         let a = 1.0 - (-7.0 * dt).exp();
@@ -202,6 +207,31 @@ impl Cam {
 
 // ------------------------------------------------------------------ world
 
+pub fn ground_color(tr: &Track, w: V2, stripe: i32) -> u32 {
+    let d = tr.dist_at(w);
+    if d < HALF_W - KERB_W {
+        let i = tr.near_idx(w) as i32;
+        let on_pad = d < 30.0 && tr.pad_ranges.iter().any(|&(a, b)| (i as usize) >= a && (i as usize) < b);
+        if on_pad {
+            if ((i + stripe) / 2) % 2 == 0 { 0xFFC107 } else { 0xFF6F00 }
+        } else if i < 4 || i as usize >= tr.n - 1 {
+            if ((w.x / 10.0).floor() as i32 + (w.y / 10.0).floor() as i32) & 1 == 0 { 0xF5F5F5 } else { 0x212121 }
+        } else if d < 2.5 && (i / 5) % 2 == 0 {
+            0xC8C8C8
+        } else {
+            0x5A5D66
+        }
+    } else if d < HALF_W {
+        let i = tr.near_idx(w);
+        if (i / 3) % 2 == 0 { 0xD32F2F } else { 0xF5F5F5 }
+    } else if d < HALF_W + GRASS_W {
+        if ((w.x / 48.0).floor() as i32 + (w.y / 48.0).floor() as i32) & 1 == 0 { 0x3C8C3C } else { 0x37823A }
+    } else {
+        let h = ((w.x / 20.0).floor() as i32).wrapping_mul(73856093) ^ ((w.y / 20.0).floor() as i32).wrapping_mul(19349663);
+        if h & 3 == 0 { 0x1B5E20 } else { 0x143D18 }
+    }
+}
+
 fn terrain(fb: &mut Fb, tr: &Track, cam: &Cam, time: f32) {
     let f = V2::from_angle(cam.ang);
     let r = f.right();
@@ -212,29 +242,7 @@ fn terrain(fb: &mut Fb, tr: &Track, cam: &Cam, time: f32) {
         let row = cam.pos + f * fy;
         for x in 0..W {
             let w = row + r * ((x as f32 - CX) * inv);
-            let d = tr.dist_at(w);
-            let col = if d < HALF_W - KERB_W {
-                let i = tr.near_idx(w) as i32;
-                let on_pad = d < 30.0 && tr.pad_ranges.iter().any(|&(a, b)| (i as usize) >= a && (i as usize) < b);
-                if on_pad {
-                    if ((i + stripe) / 2) % 2 == 0 { 0xFFC107 } else { 0xFF6F00 }
-                } else if (i < 4 || i as usize >= tr.n - 1) && d < HALF_W - KERB_W {
-                    if ((w.x / 10.0).floor() as i32 + (w.y / 10.0).floor() as i32) & 1 == 0 { 0xF5F5F5 } else { 0x212121 }
-                } else if d < 2.5 && (i / 5) % 2 == 0 {
-                    0xC8C8C8
-                } else {
-                    0x5A5D66
-                }
-            } else if d < HALF_W {
-                let i = tr.near_idx(w);
-                if (i / 3) % 2 == 0 { 0xD32F2F } else { 0xF5F5F5 }
-            } else if d < HALF_W + GRASS_W {
-                if ((w.x / 48.0).floor() as i32 + (w.y / 48.0).floor() as i32) & 1 == 0 { 0x3C8C3C } else { 0x37823A }
-            } else {
-                let h = ((w.x / 20.0).floor() as i32).wrapping_mul(73856093) ^ ((w.y / 20.0).floor() as i32).wrapping_mul(19349663);
-                if h & 3 == 0 { 0x1B5E20 } else { 0x143D18 }
-            };
-            fb.px[y * W + x] = col;
+            fb.px[y * W + x] = ground_color(tr, w, stripe);
         }
     }
 }
@@ -266,7 +274,7 @@ fn bolt(fb: &mut Fb, x: f32, y: f32, r: f32, c: u32) {
     fb.poly(&pts, c);
 }
 
-fn star(fb: &mut Fb, x: f32, y: f32, r: f32, c: u32) {
+pub fn star(fb: &mut Fb, x: f32, y: f32, r: f32, c: u32) {
     let pts: Vec<_> = (0..10)
         .map(|i| {
             let a = (i as f32 * 36.0 - 90.0).to_radians();
@@ -284,7 +292,7 @@ fn chevrons(fb: &mut Fb, x: f32, y: f32, r: f32, c: u32) {
     }
 }
 
-fn item_box(fb: &mut Fb, x: f32, y: f32, r: f32, time: f32, fake: bool) {
+pub fn item_box(fb: &mut Fb, x: f32, y: f32, r: f32, time: f32, fake: bool) {
     let a = time * 2.0;
     let pts: Vec<_> = (0..4)
         .map(|i| {
@@ -354,7 +362,11 @@ fn draw_entity(fb: &mut Fb, cam: &Cam, e: &Ent, time: f32) {
     if x < -80.0 || y < -80.0 || x > W as f32 + 80.0 || y > H as f32 + 80.0 {
         return;
     }
-    let z = cam.zoom;
+    draw_ent_at(fb, e, x, y, cam.zoom, time);
+}
+
+/// Draws a hazard at a screen position; `z` is pixels per world unit.
+pub fn draw_ent_at(fb: &mut Fb, e: &Ent, x: f32, y: f32, z: f32, time: f32) {
     match e.kind {
         EntKind::Peel => banana(fb, x, y, 11.0 * z),
         EntKind::Decoy => item_box(fb, x, y, 12.0 * z, time, true),
@@ -384,7 +396,6 @@ fn draw_entity(fb: &mut Fb, cam: &Cam, e: &Ent, time: f32) {
             fb.circle(x, y, rad * 0.35, 0xFFFDE7);
         }
     }
-    let _ = byte_angle;
 }
 
 fn draw_kart(fb: &mut Fb, cam: &Cam, k: &Kart, idx: usize, time: f32, label: bool) {
@@ -393,7 +404,7 @@ fn draw_kart(fb: &mut Fb, cam: &Cam, k: &Kart, idx: usize, time: f32, label: boo
     }
     let sc = k.scale();
     let z = cam.zoom;
-    let f = V2::from_angle(k.heading);
+    let f = V2::from_angle(k.visual_heading());
     let r = f.right();
     let body = KART_COLORS[idx % 8];
     let to = |a: f32, b: f32| cam.project(k.pos + f * (a * sc) + r * (b * sc));
@@ -490,7 +501,7 @@ pub fn draw_game(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, cam: &Cam, 
     }
 }
 
-fn draw_hud(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, k: &Kart, time: f32) {
+pub fn draw_hud(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, k: &Kart, time: f32) {
     // ink overlay for blinded karts
     if k.inked > 0.0 {
         let a = (k.inked / 1.0).min(1.0) * 0.96;
@@ -548,6 +559,14 @@ fn draw_hud(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, k: &Kart, time: 
     fb.text_center(W as i32 / 2, 92, "L-click use   R-click swap", 1, 0xDDDDDD);
 
     minimap(fb, tr, gs, me);
+
+    // wrong-way warning
+    let along = V2::from_angle(k.heading).dot(tr.tangent(k.run));
+    if gs.phase == Phase::Racing && !k.finished && along < -0.25 && (time * 3.0) as i32 % 2 == 0 {
+        let cx = W as f32 / 2.0;
+        fb.poly(&[(cx - 40.0, 150.0), (cx + 40.0, 150.0), (cx, 205.0)], 0xE53935);
+        fb.text_center(cx as i32, 214, "WRONG WAY", 4, 0xFF5252);
+    }
 
     // countdown
     if gs.phase == Phase::Countdown {
@@ -607,7 +626,7 @@ fn backdrop(fb: &mut Fb, time: f32) {
     }
 }
 
-pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, msg: &str, time: f32) {
+pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, mode3d: bool, msg: &str, time: f32) {
     backdrop(fb, time);
     fb.text_center(W as i32 / 2, 50, "Z-CART", 12, 0xFFEB3B);
     fb.text_center(W as i32 / 2, 150, "LAN kart racing - peer hosted, IPv6 link-local", 1, 0x9FB3C8);
@@ -615,6 +634,7 @@ pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, msg: &str, time: f32) 
     let lines = [
         ("H", "Host a game"),
         ("J", "Join a game on the LAN"),
+        ("V", if mode3d { "View: 3D chase" } else { "View: 2D top-down" }),
         ("N", "Change name"),
         ("Q", "Quit"),
     ];
@@ -623,8 +643,8 @@ pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, msg: &str, time: f32) 
         fb.text_shadow(300, y, &format!("[{k}]"), 3, 0x66BB6A);
         fb.text_shadow(390, y, v, 3, 0xFFFFFF);
     }
-    fb.text_shadow(300, 350, &format!("Name: {name}{cursor}"), 2, if editing { 0xFFEB3B } else { 0xCFD8DC });
-    fb.text_center(W as i32 / 2, 392, "DRIVE: WASD / arrows   DRIFT: hold Shift", 2, 0xCFD8DC);
+    fb.text_shadow(300, 368, &format!("Name: {name}{cursor}"), 2, if editing { 0xFFEB3B } else { 0xCFD8DC });
+    fb.text_center(W as i32 / 2, 392, "DRIVE: WASD / arrows   DRIFT: hold Shift   C: switch view", 2, 0xCFD8DC);
     fb.text_center(W as i32 / 2, 416, "USE ITEM: left click   SWAP ITEM SLOT: right click", 2, 0xCFD8DC);
     fb.text_center(W as i32 / 2, 456, "Items: Peel Bouncer Seeker Nova Turbo Giant Star Bomb Decoy Zap Rocket Ink Nitro", 1, 0x9FB3C8);
     if !msg.is_empty() {

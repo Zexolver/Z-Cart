@@ -3,12 +3,14 @@
 mod math;
 mod net;
 mod render;
+mod render3d;
 mod sim;
 mod track;
 
 use minifb::{Key, KeyRepeat, MouseButton, Window, WindowOptions};
 use net::*;
 use render::*;
+use render3d::draw_game3d;
 use sim::*;
 use std::time::Instant;
 use track::Track;
@@ -40,6 +42,7 @@ struct App {
     tick_acc: f32,
     lobby_tick: u32,
     quit: bool,
+    mode3d: bool,
     #[allow(dead_code)]
     dbg_item: usize,
 }
@@ -81,6 +84,7 @@ impl App {
             tick_acc: 0.0,
             lobby_tick: 0,
             quit: false,
+            mode3d: true,
             dbg_item: 0,
         }
     }
@@ -208,6 +212,8 @@ impl App {
             self.start_hosting();
         } else if w.is_key_pressed(Key::J, KeyRepeat::No) {
             self.open_browser();
+        } else if w.is_key_pressed(Key::V, KeyRepeat::No) {
+            self.mode3d = !self.mode3d;
         } else if w.is_key_pressed(Key::N, KeyRepeat::No) {
             self.editing_name = true;
         } else if w.is_key_pressed(Key::Q, KeyRepeat::No) {
@@ -260,6 +266,9 @@ impl App {
     /// One frame of in-game logic. `dt` is the real frame time.
     fn play_frame(&mut self, w: &Window, dt: f32) {
         let inp = self.read_input(w);
+        if w.is_key_pressed(Key::C, KeyRepeat::No) {
+            self.mode3d = !self.mode3d;
+        }
         let esc = w.is_key_pressed(Key::Escape, KeyRepeat::No);
         let enter = w.is_key_pressed(Key::Enter, KeyRepeat::No);
         let mut leave = esc;
@@ -322,7 +331,11 @@ impl App {
                     self.cam.pos = k.pos;
                     self.cam.ang = k.heading;
                 } else {
-                    self.cam.follow(k, dt);
+                    if self.mode3d {
+                        self.cam.follow3(k, dt);
+                    } else {
+                        self.cam.follow(k, dt);
+                    }
                 }
             }
         }
@@ -340,9 +353,7 @@ impl App {
                 if gs.phase == Phase::Racing || gs.phase == Phase::Countdown {
                     for k in gs.karts.iter_mut() {
                         k.pos += k.vel * age;
-                        if k.spin > 0.0 {
-                            k.heading += 12.0 * age;
-                        }
+                        k.spin = (k.spin - age).max(0.0);
                     }
                 }
                 Some((gs, id))
@@ -353,7 +364,7 @@ impl App {
 
     fn draw(&mut self, fb: &mut Fb, time: f32) {
         match &self.screen {
-            Screen::Title => draw_title(fb, &self.name, self.editing_name, &self.msg, time),
+            Screen::Title => draw_title(fb, &self.name, self.editing_name, self.mode3d, &self.msg, time),
             Screen::Browse(b, sel) => draw_browse(fb, &b.hosts, *sel, &self.msg, time),
             Screen::Play => {
                 let is_host = matches!(self.session, Session::Host { .. });
@@ -366,7 +377,11 @@ impl App {
                     Some((gs, me)) => match gs.phase {
                         Phase::Lobby => draw_lobby(fb, &gs, me, is_host, port, time),
                         _ => {
-                            draw_game(fb, &self.tr, &gs, me, &self.cam, time);
+                            if self.mode3d {
+                                draw_game3d(fb, &self.tr, &gs, me, &self.cam, time);
+                            } else {
+                                draw_game(fb, &self.tr, &gs, me, &self.cam, time);
+                            }
                             if gs.phase == Phase::Results {
                                 draw_results(fb, &gs, me, is_host);
                             }
@@ -379,7 +394,7 @@ impl App {
 }
 
 /// `z-cart --shot out.ppm`: render one frame of a bot race, for debugging.
-fn screenshot(path: &str) {
+fn screenshot(path: &str, three_d: bool) {
     let tr = Track::new();
     let mut gs = GameState::new(&tr);
     gs.bots = 7;
@@ -394,9 +409,14 @@ fn screenshot(path: &str) {
     gs.karts[0].coins = 6;
     gs.ents.push(Ent { kind: EntKind::Peel, pos: gs.karts[0].pos + math::V2::from_angle(gs.karts[0].heading) * 200.0, vel: math::V2::ZERO, owner: 9, age: 1.0, timer: 0.0, target: 0, run: 0, bounces: 0 });
     let mut cam = Cam { pos: gs.karts[0].pos, ang: gs.karts[0].heading, zoom: 1.3 };
-    cam.follow(&gs.karts[0], 1.0);
     let mut fb = Fb::new();
-    draw_game(&mut fb, &tr, &gs, 0, &cam, 3.3);
+    if three_d {
+        cam.follow3(&gs.karts[0], 1.0);
+        draw_game3d(&mut fb, &tr, &gs, 0, &cam, 3.3);
+    } else {
+        cam.follow(&gs.karts[0], 1.0);
+        draw_game(&mut fb, &tr, &gs, 0, &cam, 3.3);
+    }
     let mut out = format!("P6\n{W} {H}\n255\n").into_bytes();
     for p in &fb.px {
         out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
@@ -406,8 +426,8 @@ fn screenshot(path: &str) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() == 3 && args[1] == "--shot" {
-        return screenshot(&args[2]);
+    if args.len() >= 3 && args[1] == "--shot" {
+        return screenshot(&args[2], args.get(3).map_or(false, |a| a == "3d"));
     }
     let mut window = Window::new(
         "Z-Cart",
