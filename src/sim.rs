@@ -390,6 +390,35 @@ impl GameState {
         self.grid(tr);
     }
 
+    /// Debug: drop a new bot just behind the host's kart mid-race.
+    #[cfg(feature = "debug-tools")]
+    pub fn debug_add_bot(&mut self, tr: &Track) {
+        if self.karts.len() >= MAX_KARTS || !matches!(self.phase, Phase::Racing | Phase::Countdown) || self.karts.is_empty() {
+            return;
+        }
+        let bots = self.karts.iter().filter(|k| k.is_bot).count();
+        let mut k = Kart::new(&format!("Bot {}", bots + 1), true);
+        let run = self.karts[0].run - 10;
+        let mut seed = self.rng ^ self.karts.len() as u64;
+        k.lane = (rng_f32(&mut seed) - 0.5) * 90.0;
+        self.rng = seed;
+        let t = tr.tangent(run);
+        k.pos = tr.pt(run) + t.right() * k.lane;
+        k.heading = t.y.atan2(t.x);
+        k.run = run;
+        k.prog = run as f32;
+        k.place = self.karts.len() as u8;
+        self.karts.push(k);
+    }
+
+    #[cfg(feature = "debug-tools")]
+    pub fn debug_remove_bot(&mut self) {
+        if self.karts.len() > 1 && self.karts.last().map_or(false, |k| k.is_bot) {
+            self.karts.pop();
+            self.ents.retain(|e| (e.owner as usize) < self.karts.len() || e.owner == 255);
+        }
+    }
+
     fn roll_item(&mut self, place: usize) -> Item {
         let n = self.karts.len();
         let t = if n <= 1 { 0.0 } else { place as f32 / (n - 1) as f32 };

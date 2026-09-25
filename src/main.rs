@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod math;
 mod net;
 mod render;
@@ -38,6 +40,8 @@ struct App {
     tick_acc: f32,
     lobby_tick: u32,
     quit: bool,
+    #[allow(dead_code)]
+    dbg_item: usize,
 }
 
 fn default_name() -> String {
@@ -77,6 +81,7 @@ impl App {
             tick_acc: 0.0,
             lobby_tick: 0,
             quit: false,
+            dbg_item: 0,
         }
     }
 
@@ -99,6 +104,46 @@ impl App {
             drift: down(Key::LeftShift, Key::RightShift),
             use_seq: self.use_seq,
             swap_seq: self.swap_seq,
+        }
+    }
+
+    /// Test helpers, only compiled into `--features debug-tools` builds.
+    #[cfg(feature = "debug-tools")]
+    fn debug_keys(&mut self, w: &Window) {
+        let Session::Host { gs, .. } = &mut self.session else { return };
+        let hit = |k: Key| w.is_key_pressed(k, KeyRepeat::No);
+        let n = Item::ALL.len();
+        if hit(Key::F1) {
+            gs.debug_add_bot(&self.tr);
+        }
+        if hit(Key::F2) {
+            gs.debug_remove_bot();
+        }
+        if hit(Key::F3) || hit(Key::F4) {
+            self.dbg_item = if hit(Key::F3) { (self.dbg_item + 1) % n } else { (self.dbg_item + n - 1) % n };
+            let it = Item::ALL[self.dbg_item];
+            if let Some(k) = gs.karts.get_mut(0) {
+                k.slots[0] = (it as u8, it.uses());
+            }
+        }
+        if hit(Key::F5) && gs.phase == Phase::Racing {
+            let run = gs.laps as i32 * self.tr.n as i32 - 60;
+            if let Some(k) = gs.karts.get_mut(0) {
+                k.run = run;
+                k.prog = run as f32;
+                k.pos = self.tr.pt(run);
+                let t = self.tr.tangent(run);
+                k.heading = t.y.atan2(t.x);
+            }
+        }
+        if hit(Key::F6) {
+            if let Some(k) = gs.karts.get_mut(0) {
+                k.coins = 10;
+            }
+        }
+        if hit(Key::F8) && gs.phase != Phase::Lobby {
+            gs.to_lobby(&self.tr);
+            gs.start_race(&self.tr);
         }
     }
 
@@ -218,6 +263,8 @@ impl App {
         let esc = w.is_key_pressed(Key::Escape, KeyRepeat::No);
         let enter = w.is_key_pressed(Key::Enter, KeyRepeat::No);
         let mut leave = esc;
+        #[cfg(feature = "debug-tools")]
+        self.debug_keys(w);
         match &mut self.session {
             Session::Host { host, gs, .. } => {
                 host.poll(gs, &self.tr);
@@ -385,6 +432,16 @@ fn main() {
             Screen::Play => app.play_frame(&window, dt),
         }
         app.draw(&mut fb, time);
+        #[cfg(feature = "debug-tools")]
+        {
+            fb.text_shadow(6, H as i32 - 10, "DEBUG BUILD", 1, 0xFF5252);
+            if matches!(app.screen, Screen::Play) {
+                let help = ["F1 add bot  F2 remove bot", "F3/F4 cycle item", "F5 jump to last lap", "F6 max coins  F8 restart"];
+                for (i, l) in help.iter().enumerate() {
+                    fb.text_shadow(W as i32 - 210, H as i32 - 60 + i as i32 * 12, l, 1, 0xFF8A80);
+                }
+            }
+        }
         window.update_with_buffer(&fb.px, W, H).expect("present failed");
     }
     app.leave();

@@ -45,3 +45,20 @@ Also: coins (+top speed), boost pads, drift mini-turbos (blue/orange/purple spar
 ## Tests / debugging
     cargo test --release          # sim, track, and loopback networking tests
     cargo run --release -- --shot frame.ppm   # render one frame headlessly
+
+## Debug build / test keys
+Build with `--features debug-tools` (the arm64 `.deb` release asset is built this way, in the dev profile):
+
+| Key | Action |
+|---|---|
+| F1 / F2 | add / remove a bot mid-race |
+| F3 / F4 | cycle the primary slot through every item |
+| F5 | jump to just before the final finish line |
+| F6 | max coins |
+| F8 | restart the race |
+
+Solo testing: press H, then Enter in the lobby (set bots with B first). The window is freely resizable/maximizable; the
+view is scaled to fit while keeping its aspect ratio.
+
+## Packaging
+`scripts/package.sh` builds `dist/z-cart_<ver>_arm64.deb` and `dist/z-cart-amd64.exe` (cross-compiled with `zig cc` as linker).

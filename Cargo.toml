@@ -10,3 +10,7 @@ minifb = "0.28.0"
 
 [profile.dev]
 opt-level = 2
+
+[features]
+# Extra in-game test keys (spawn bots, give items, ...). Off in release builds.
+debug-tools = []
