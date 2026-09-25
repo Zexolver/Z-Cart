@@ -295,7 +295,9 @@ fn link_local_ifaces() -> Vec<u32> {
 
 pub struct Browser {
     pub sock: UdpSocket,
-    ifaces: Vec<u32>,
+    pub ifaces: Vec<u32>,
+    /// Discovery replies received so far (diagnostics).
+    pub replies: u32,
     pub hosts: Vec<HostInfo>,
     last_query: Option<Instant>,
     port: u16,
@@ -307,7 +309,7 @@ impl Browser {
     }
 
     pub fn with_port(port: u16) -> std::io::Result<Browser> {
-        Ok(Browser { sock: new_socket(0)?, ifaces: link_local_ifaces(), hosts: Vec::new(), last_query: None, port })
+        Ok(Browser { sock: new_socket(0)?, ifaces: link_local_ifaces(), replies: 0, hosts: Vec::new(), last_query: None, port })
     }
 
     pub fn query(&mut self) {
@@ -335,6 +337,7 @@ impl Browser {
                         continue;
                     }
                     if let Some((T_REPLY, mut r)) = parse(&buf[..n]) {
+                        self.replies += 1;
                         let info = (|| {
                             Some(HostInfo {
                                 addr: from,
@@ -359,6 +362,59 @@ impl Browser {
         }
         self.hosts.retain(|h| h.seen.elapsed() < Duration::from_secs(6));
     }
+}
+
+/// This machine's link-local addresses as friends should type them ("fe80::1%17").
+pub fn local_addr_strings() -> Vec<String> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V6(a) if (a.ip.segments()[0] & 0xffc0) == 0xfe80 => {
+                Some(format!("{}%{}", a.ip, i.index.map_or(i.name.clone(), |x| x.to_string())))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Parses "fe80::1%17", "fe80::1%eth0" or "[fe80::1%17]:47777" (zone = interface number or name).
+pub fn parse_addr(text: &str) -> Result<SocketAddr, String> {
+    let t = text.trim();
+    let (host, port) = match t.strip_prefix('[') {
+        Some(rest) => {
+            let (h, tail) = rest.split_once(']').ok_or("missing ]")?;
+            let port = match tail.strip_prefix(':') {
+                Some(p) => p.parse::<u16>().map_err(|_| "bad port")?,
+                None => PORT,
+            };
+            (h, port)
+        }
+        None => (t, PORT),
+    };
+    let (ip_s, zone_s) = match host.split_once('%') {
+        Some((a, z)) => (a, Some(z)),
+        None => (host, None),
+    };
+    let ip: Ipv6Addr = ip_s.parse().map_err(|_| "not an IPv6 address".to_string())?;
+    let link_local = (ip.segments()[0] & 0xffc0) == 0xfe80;
+    if !link_local && !ip.is_loopback() {
+        return Err("only fe80:: link-local addresses are supported".into());
+    }
+    let zone = match zone_s {
+        Some(z) => match z.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) => if_addrs::get_if_addrs()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|i| i.name == z)
+                .and_then(|i| i.index)
+                .ok_or_else(|| format!("unknown interface '{z}'"))?,
+        },
+        None if link_local => return Err("add the interface after %, e.g. fe80::1%17".into()),
+        None => 0,
+    };
+    Ok(SocketAddr::V6(SocketAddrV6::new(ip, port, 0, zone)))
 }
 
 // ---------------------------------------------------------------- host
@@ -680,5 +736,21 @@ mod tests {
         }
         let len = encode_snapshot(&gs, 1, 0).len();
         assert!(len < 1232, "snapshot is {len} bytes");
+    }
+
+    #[test]
+    fn parses_typed_addresses() {
+        let a = parse_addr("fe80::845b:a627:1a5e:9af4%17").unwrap();
+        assert_eq!(a.port(), PORT);
+        match a {
+            SocketAddr::V6(v) => assert_eq!(v.scope_id(), 17),
+            _ => panic!(),
+        }
+        let b = parse_addr(" [fe80::1%3]:5000 ").unwrap();
+        assert_eq!(b.port(), 5000);
+        assert!(parse_addr("fe80::1").is_err(), "zone required");
+        assert!(parse_addr("192.168.0.2").is_err());
+        assert!(parse_addr("2001:db8::1").is_err());
+        assert!(parse_addr("::1").is_ok());
     }
 }

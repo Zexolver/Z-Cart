@@ -41,6 +41,9 @@ struct App {
     prev_left: bool,
     prev_right: bool,
     title_click: bool,
+    /// Text being typed in the join-by-address box (Some while open).
+    addr_input: Option<String>,
+    local_addrs: Vec<String>,
     /// Current window size in pixels, for mapping the mouse onto the letterboxed picture.
     win: (usize, usize),
     tick_acc: f32,
@@ -103,6 +106,8 @@ impl App {
             prev_left: false,
             prev_right: false,
             title_click: false,
+            addr_input: None,
+            local_addrs: Vec::new(),
             win: (W, H),
             tick_acc: 0.0,
             lobby_tick: 0,
@@ -192,6 +197,7 @@ impl App {
                 let mut gs = GameState::new(&self.tracks[0]);
                 gs.rng ^= std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
                 gs.add_human(&self.tracks[0], &self.name);
+                self.local_addrs = local_addr_strings();
                 self.session = Session::Host { host, gs, port: PORT };
                 self.screen = Screen::Play;
                 self.msg.clear();
@@ -278,8 +284,52 @@ impl App {
     fn browse_keys(&mut self, w: &Window) {
         let mut join: Option<std::net::SocketAddr> = None;
         let mut back = false;
-        if let Screen::Browse(b, sel) = &mut self.screen {
+        if self.addr_input.is_some() {
+            // typing an address by hand
+            let shift = w.is_key_down(Key::LeftShift) || w.is_key_down(Key::RightShift);
+            let mut submit = false;
+            let buf = self.addr_input.as_mut().unwrap();
+            for k in w.get_keys_pressed(KeyRepeat::Yes) {
+                match k {
+                    Key::Escape => submit = false,
+                    Key::Enter => submit = true,
+                    Key::Backspace => {
+                        buf.pop();
+                    }
+                    Key::Semicolon if shift => buf.push(':'),
+                    Key::Key5 if shift => buf.push('%'),
+                    Key::Minus => buf.push(if shift { '_' } else { '-' }),
+                    Key::LeftBracket if shift => buf.push('{'),
+                    _ => {
+                        if let Some(c) = key_char(k, false) {
+                            if buf.len() < 64 {
+                                buf.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+            if w.is_key_pressed(Key::Escape, KeyRepeat::No) {
+                self.addr_input = None;
+                self.msg.clear();
+            } else if submit {
+                match parse_addr(self.addr_input.as_deref().unwrap_or("")) {
+                    Ok(a) => {
+                        join = Some(a);
+                        self.addr_input = None;
+                    }
+                    Err(e) => self.msg = e,
+                }
+            }
+            if let Screen::Browse(b, _) = &mut self.screen {
+                b.poll();
+            }
+        } else if let Screen::Browse(b, sel) = &mut self.screen {
             b.poll();
+            if w.is_key_pressed(Key::A, KeyRepeat::No) {
+                self.addr_input = Some(String::new());
+                self.msg.clear();
+            }
             if b.hosts.is_empty() {
                 *sel = 0;
             } else {
@@ -379,7 +429,11 @@ impl App {
                     self.msg = if r == 1 { "Race already in progress.".into() } else { "Game is full.".into() };
                     leave = true;
                 } else if cl.host_gone {
-                    self.msg = "Lost connection to the host.".into();
+                    self.msg = if cl.snap_at.is_none() {
+                        "Could not reach the host - check the address and the host's firewall.".into()
+                    } else {
+                        "Lost connection to the host.".into()
+                    };
                     leave = true;
                 }
             }
@@ -433,7 +487,10 @@ impl App {
     fn draw(&mut self, fb: &mut Fb, time: f32) {
         match &self.screen {
             Screen::Title => draw_title(fb, &self.name, self.editing_name, self.mode3d, &self.msg, time),
-            Screen::Browse(b, sel) => draw_browse(fb, &b.hosts, *sel, &self.msg, time),
+            Screen::Browse(b, sel) => {
+                let diag = format!("scanning interfaces {:?}, {} discovery reply(ies)", b.ifaces, b.replies);
+                draw_browse(fb, &b.hosts, *sel, self.addr_input.as_deref(), &diag, &self.msg, time)
+            }
             Screen::Play => {
                 let is_host = matches!(self.session, Session::Host { .. });
                 let port = match &self.session {
@@ -447,7 +504,7 @@ impl App {
                     Some((gs, me)) => match gs.phase {
                         Phase::Lobby => {
                             let label = if gs.track_sel == 255 { "Random".to_string() } else { track_name(gs.track_sel as usize).to_string() };
-                            draw_lobby(fb, &gs, me, is_host, port, &label, time)
+                            draw_lobby(fb, &gs, me, is_host, port, &label, &self.local_addrs, time)
                         }
                         _ => {
                             if self.mode3d {
@@ -502,7 +559,7 @@ fn screenshot(path: &str, three_d: bool, track: usize, extra: &str) {
             draw_results(&mut fb, &gs, 0, true);
         }
         "title" => draw_title(&mut fb, "Zexolver", false, true, "", 1.0),
-        "lobby" => draw_lobby(&mut fb, &gs, 0, true, Some(PORT), "Random", 1.0),
+        "lobby" => draw_lobby(&mut fb, &gs, 0, true, Some(PORT), "Random", &local_addr_strings(), 1.0),
         _ => {}
     }
     let mut out = format!("P6\n{W} {H}\n255\n").into_bytes();
