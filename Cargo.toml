@@ -1,0 +1,12 @@
+[package]
+name = "z-cart"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+font8x8 = "0.3.1"
+if-addrs = "0.15.0"
+minifb = "0.28.0"
+
+[profile.dev]
+opt-level = 2

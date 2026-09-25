@@ -1,0 +1,391 @@
+mod math;
+mod net;
+mod render;
+mod sim;
+mod track;
+
+use minifb::{Key, KeyRepeat, MouseButton, Window, WindowOptions};
+use net::*;
+use render::*;
+use sim::*;
+use std::time::Instant;
+use track::Track;
+
+enum Session {
+    None,
+    Host { host: Host, gs: GameState, port: u16 },
+    Client { cl: Client },
+}
+
+enum Screen {
+    Title,
+    Browse(Browser, usize),
+    Play,
+}
+
+struct App {
+    tr: Track,
+    name: String,
+    editing_name: bool,
+    msg: String,
+    screen: Screen,
+    session: Session,
+    cam: Cam,
+    use_seq: u8,
+    swap_seq: u8,
+    prev_left: bool,
+    prev_right: bool,
+    tick_acc: f32,
+    lobby_tick: u32,
+    quit: bool,
+}
+
+fn default_name() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "Racer".into())
+        .chars()
+        .take(NAME_LEN)
+        .collect()
+}
+
+fn key_char(k: Key, shift: bool) -> Option<char> {
+    use Key::*;
+    let letters = [A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z];
+    if let Some(i) = letters.iter().position(|&l| l == k) {
+        let c = (b'a' + i as u8) as char;
+        return Some(if shift { c.to_ascii_uppercase() } else { c });
+    }
+    let digits = [Key0, Key1, Key2, Key3, Key4, Key5, Key6, Key7, Key8, Key9];
+    digits.iter().position(|&d| d == k).map(|i| (b'0' + i as u8) as char)
+}
+
+impl App {
+    fn new() -> App {
+        App {
+            tr: Track::new(),
+            name: default_name(),
+            editing_name: false,
+            msg: String::new(),
+            screen: Screen::Title,
+            session: Session::None,
+            cam: Cam { pos: math::V2::ZERO, ang: 0.0, zoom: 1.3 },
+            use_seq: 0,
+            swap_seq: 0,
+            prev_left: false,
+            prev_right: false,
+            tick_acc: 0.0,
+            lobby_tick: 0,
+            quit: false,
+        }
+    }
+
+    fn read_input(&mut self, w: &Window) -> Input {
+        let down = |a: Key, b: Key| w.is_key_down(a) || w.is_key_down(b);
+        let left = w.get_mouse_down(MouseButton::Left);
+        let right = w.get_mouse_down(MouseButton::Right);
+        if left && !self.prev_left {
+            self.use_seq = self.use_seq.wrapping_add(1);
+        }
+        if right && !self.prev_right {
+            self.swap_seq = self.swap_seq.wrapping_add(1);
+        }
+        self.prev_left = left;
+        self.prev_right = right;
+        Input {
+            steer: down(Key::D, Key::Right) as i32 as f32 - down(Key::A, Key::Left) as i32 as f32,
+            throttle: down(Key::W, Key::Up),
+            brake: down(Key::S, Key::Down),
+            drift: down(Key::LeftShift, Key::RightShift),
+            use_seq: self.use_seq,
+            swap_seq: self.swap_seq,
+        }
+    }
+
+    fn leave(&mut self) {
+        match std::mem::replace(&mut self.session, Session::None) {
+            Session::Host { mut host, .. } => host.shutdown(),
+            Session::Client { cl } => cl.leave(),
+            Session::None => {}
+        }
+        self.screen = Screen::Title;
+    }
+
+    fn start_hosting(&mut self) {
+        match Host::bind(PORT) {
+            Ok(host) => {
+                let mut gs = GameState::new(&self.tr);
+                gs.add_human(&self.tr, &self.name);
+                self.session = Session::Host { host, gs, port: PORT };
+                self.screen = Screen::Play;
+                self.msg.clear();
+            }
+            Err(e) => self.msg = format!("Cannot host: {e} (already hosting?)"),
+        }
+    }
+
+    fn open_browser(&mut self) {
+        match Browser::new() {
+            Ok(mut b) => {
+                b.query();
+                self.screen = Screen::Browse(b, 0);
+                self.msg.clear();
+            }
+            Err(e) => self.msg = format!("IPv6 networking unavailable: {e}"),
+        }
+    }
+
+    fn title_keys(&mut self, w: &Window) {
+        let shift = w.is_key_down(Key::LeftShift) || w.is_key_down(Key::RightShift);
+        if self.editing_name {
+            for k in w.get_keys_pressed(KeyRepeat::Yes) {
+                match k {
+                    Key::Enter | Key::Escape => self.editing_name = false,
+                    Key::Backspace => {
+                        self.name.pop();
+                    }
+                    Key::Space if self.name.len() < NAME_LEN => self.name.push(' '),
+                    _ => {
+                        if let Some(c) = key_char(k, shift) {
+                            if self.name.chars().count() < NAME_LEN {
+                                self.name.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+            if self.name.trim().is_empty() && !self.editing_name {
+                self.name = default_name();
+            }
+            return;
+        }
+        if w.is_key_pressed(Key::H, KeyRepeat::No) {
+            self.start_hosting();
+        } else if w.is_key_pressed(Key::J, KeyRepeat::No) {
+            self.open_browser();
+        } else if w.is_key_pressed(Key::N, KeyRepeat::No) {
+            self.editing_name = true;
+        } else if w.is_key_pressed(Key::Q, KeyRepeat::No) {
+            self.quit = true;
+        }
+    }
+
+    fn browse_keys(&mut self, w: &Window) {
+        let mut join: Option<std::net::SocketAddr> = None;
+        let mut back = false;
+        if let Screen::Browse(b, sel) = &mut self.screen {
+            b.poll();
+            if b.hosts.is_empty() {
+                *sel = 0;
+            } else {
+                *sel = (*sel).min(b.hosts.len() - 1);
+            }
+            if w.is_key_pressed(Key::Down, KeyRepeat::Yes) && *sel + 1 < b.hosts.len() {
+                *sel += 1;
+            }
+            if w.is_key_pressed(Key::Up, KeyRepeat::Yes) && *sel > 0 {
+                *sel -= 1;
+            }
+            if w.is_key_pressed(Key::R, KeyRepeat::No) {
+                b.query();
+            }
+            if w.is_key_pressed(Key::Enter, KeyRepeat::No) {
+                if let Some(h) = b.hosts.get(*sel) {
+                    if h.joinable() {
+                        join = Some(h.addr);
+                    } else {
+                        self.msg = "That game is full or already racing.".into();
+                    }
+                }
+            }
+            back = w.is_key_pressed(Key::Escape, KeyRepeat::No);
+        }
+        if let Some(addr) = join {
+            if let Screen::Browse(b, _) = std::mem::replace(&mut self.screen, Screen::Play) {
+                let cl = Client::new(b.sock, addr, &self.name, &self.tr);
+                self.session = Session::Client { cl };
+                self.msg.clear();
+            }
+        } else if back {
+            self.screen = Screen::Title;
+            self.msg.clear();
+        }
+    }
+
+    /// One frame of in-game logic. `dt` is the real frame time.
+    fn play_frame(&mut self, w: &Window, dt: f32) {
+        let inp = self.read_input(w);
+        let esc = w.is_key_pressed(Key::Escape, KeyRepeat::No);
+        let enter = w.is_key_pressed(Key::Enter, KeyRepeat::No);
+        let mut leave = esc;
+        match &mut self.session {
+            Session::Host { host, gs, .. } => {
+                host.poll(gs, &self.tr);
+                if let Some(k) = gs.karts.get_mut(0) {
+                    k.input = inp;
+                }
+                match gs.phase {
+                    Phase::Lobby => {
+                        if enter {
+                            gs.start_race(&self.tr);
+                        }
+                        if w.is_key_pressed(Key::B, KeyRepeat::No) {
+                            gs.bots = (gs.bots + 1) % 8;
+                        }
+                        if w.is_key_pressed(Key::L, KeyRepeat::No) {
+                            gs.laps = gs.laps % 9 + 1;
+                        }
+                    }
+                    Phase::Results if enter => gs.to_lobby(&self.tr),
+                    _ => {}
+                }
+                self.tick_acc += dt.min(0.1);
+                while self.tick_acc >= DT {
+                    self.tick_acc -= DT;
+                    gs.step(&self.tr);
+                    self.lobby_tick += 1;
+                    if gs.phase != Phase::Lobby || self.lobby_tick % 6 == 0 {
+                        host.broadcast(gs);
+                    }
+                }
+            }
+            Session::Client { cl } => {
+                cl.poll();
+                cl.send_input(inp);
+                if let Some(r) = cl.rejected {
+                    self.msg = if r == 1 { "Race already in progress.".into() } else { "Game is full.".into() };
+                    leave = true;
+                } else if cl.host_gone {
+                    self.msg = "Lost connection to the host.".into();
+                    leave = true;
+                }
+            }
+            Session::None => leave = true,
+        }
+        if leave {
+            let m = std::mem::take(&mut self.msg);
+            self.leave();
+            self.msg = m;
+            return;
+        }
+        // camera follows our own kart
+        if let Some((gs, me)) = self.view() {
+            if let Some(k) = gs.karts.get(me) {
+                if matches!(gs.phase, Phase::Lobby) {
+                    self.cam.pos = k.pos;
+                    self.cam.ang = k.heading;
+                } else {
+                    self.cam.follow(k, dt);
+                }
+            }
+        }
+    }
+
+    /// Game state to draw (clients extrapolate a little between snapshots).
+    fn view(&self) -> Option<(GameState, usize)> {
+        match &self.session {
+            Session::Host { gs, .. } => Some((gs.clone(), 0)),
+            Session::Client { cl } => {
+                let id = cl.id?;
+                cl.snap_at?;
+                let mut gs = cl.state.clone();
+                let age = cl.snap_at.unwrap().elapsed().as_secs_f32().min(0.1);
+                if gs.phase == Phase::Racing || gs.phase == Phase::Countdown {
+                    for k in gs.karts.iter_mut() {
+                        k.pos += k.vel * age;
+                        if k.spin > 0.0 {
+                            k.heading += 12.0 * age;
+                        }
+                    }
+                }
+                Some((gs, id))
+            }
+            Session::None => None,
+        }
+    }
+
+    fn draw(&mut self, fb: &mut Fb, time: f32) {
+        match &self.screen {
+            Screen::Title => draw_title(fb, &self.name, self.editing_name, &self.msg, time),
+            Screen::Browse(b, sel) => draw_browse(fb, &b.hosts, *sel, &self.msg, time),
+            Screen::Play => {
+                let is_host = matches!(self.session, Session::Host { .. });
+                let port = match &self.session {
+                    Session::Host { port, .. } => Some(*port),
+                    _ => None,
+                };
+                match self.view() {
+                    None => draw_connecting(fb, time),
+                    Some((gs, me)) => match gs.phase {
+                        Phase::Lobby => draw_lobby(fb, &gs, me, is_host, port, time),
+                        _ => {
+                            draw_game(fb, &self.tr, &gs, me, &self.cam, time);
+                            if gs.phase == Phase::Results {
+                                draw_results(fb, &gs, me, is_host);
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// `z-cart --shot out.ppm`: render one frame of a bot race, for debugging.
+fn screenshot(path: &str) {
+    let tr = Track::new();
+    let mut gs = GameState::new(&tr);
+    gs.bots = 7;
+    gs.add_human(&tr, "You");
+    gs.karts[0].is_bot = true;
+    gs.start_race(&tr);
+    for _ in 0..(60 * 14) {
+        gs.step(&tr);
+    }
+    gs.karts[0].is_bot = false;
+    gs.karts[0].slots = [(Item::Seeker as u8, 1), (Item::TripleTurbo as u8, 3)];
+    gs.karts[0].coins = 6;
+    gs.ents.push(Ent { kind: EntKind::Peel, pos: gs.karts[0].pos + math::V2::from_angle(gs.karts[0].heading) * 200.0, vel: math::V2::ZERO, owner: 9, age: 1.0, timer: 0.0, target: 0, run: 0, bounces: 0 });
+    let mut cam = Cam { pos: gs.karts[0].pos, ang: gs.karts[0].heading, zoom: 1.3 };
+    cam.follow(&gs.karts[0], 1.0);
+    let mut fb = Fb::new();
+    draw_game(&mut fb, &tr, &gs, 0, &cam, 3.3);
+    let mut out = format!("P6\n{W} {H}\n255\n").into_bytes();
+    for p in &fb.px {
+        out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+    }
+    std::fs::write(path, out).expect("write screenshot");
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "--shot" {
+        return screenshot(&args[2]);
+    }
+    let mut window = Window::new(
+        "Z-Cart",
+        W,
+        H,
+        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::AspectRatioStretch, ..WindowOptions::default() },
+    )
+    .expect("could not open a window");
+    window.set_target_fps(60);
+    let mut fb = Fb::new();
+    let mut app = App::new();
+    let start = Instant::now();
+    let mut last = start;
+    while window.is_open() && !app.quit {
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32();
+        last = now;
+        let time = (now - start).as_secs_f32();
+        match app.screen {
+            Screen::Title => app.title_keys(&window),
+            Screen::Browse(..) => app.browse_keys(&window),
+            Screen::Play => app.play_frame(&window, dt),
+        }
+        app.draw(&mut fb, time);
+        window.update_with_buffer(&fb.px, W, H).expect("present failed");
+    }
+    app.leave();
+}
