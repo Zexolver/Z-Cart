@@ -662,6 +662,9 @@ fn backdrop(fb: &mut Fb, time: f32) {
     }
 }
 
+pub const NAME_X: i32 = 300;
+pub const NAME_Y: i32 = 364;
+
 pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, mode3d: bool, msg: &str, time: f32) {
     backdrop(fb, time);
     fb.text_center(W as i32 / 2, 50, "Z-CART", 10, 0xFFEB3B);
@@ -671,7 +674,7 @@ pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, mode3d: bool, msg: &st
         ("H", "Host a game"),
         ("J", "Join a game on the LAN"),
         ("V", if mode3d { "View: 3D chase" } else { "View: 2D top-down" }),
-        ("N", "Change name"),
+        ("N", "Edit name (or click it)"),
         ("Q", "Quit"),
     ];
     for (i, (k, v)) in lines.iter().enumerate() {
@@ -679,7 +682,10 @@ pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, mode3d: bool, msg: &st
         fb.text_shadow(300, y, &format!("[{k}]"), 2, 0x66BB6A);
         fb.text_shadow(370, y, v, 2, 0xFFFFFF);
     }
-    fb.text_shadow(300, 364, &format!("Name: {name}{cursor}"), 2, if editing { 0xFFEB3B } else { 0xCFD8DC });
+    fb.text_shadow(NAME_X, NAME_Y, &format!("Name: {name}{cursor}"), 2, if editing { 0xFFEB3B } else { 0xCFD8DC });
+    if !editing {
+        fb.text(NAME_X + (7 + name.chars().count() as i32) * 16, NAME_Y + 4, "(click to edit)", 1, 0x78909C);
+    }
     fb.text_center(W as i32 / 2, 404, "DRIVE: WASD / arrows   DRIFT: hold Shift   V: switch view", 1, 0xCFD8DC);
     fb.text_center(W as i32 / 2, 428, "USE ITEM: left click (hold Space: throw backward)   SWAP SLOT: right click", 1, 0xCFD8DC);
     fb.text_center(W as i32 / 2, 466, "Items: Peel Bouncer Seeker Nova Turbo Giant Star Bomb Decoy Zap Rocket Ink Nitro", 1, 0x9FB3C8);

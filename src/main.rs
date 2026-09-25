@@ -40,6 +40,9 @@ struct App {
     swap_seq: u8,
     prev_left: bool,
     prev_right: bool,
+    title_click: bool,
+    /// Current window size in pixels, for mapping the mouse onto the letterboxed picture.
+    win: (usize, usize),
     tick_acc: f32,
     lobby_tick: u32,
     quit: bool,
@@ -58,10 +61,17 @@ fn track_index(session: &Session, count: usize) -> usize {
     (t as usize).min(count - 1)
 }
 
+/// The computer's name (falls back to the login name), without any domain suffix.
 fn default_name() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "Racer".into())
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .map(|s| s.trim().split('.').next().unwrap_or("").to_string())
+        .filter(|s| !s.is_empty());
+    host.or_else(|| std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok())
+        .unwrap_or_else(|| "Racer".into())
         .chars()
         .take(NAME_LEN)
         .collect()
@@ -92,6 +102,8 @@ impl App {
             swap_seq: 0,
             prev_left: false,
             prev_right: false,
+            title_click: false,
+            win: (W, H),
             tick_acc: 0.0,
             lobby_tick: 0,
             quit: false,
@@ -199,7 +211,33 @@ impl App {
         }
     }
 
+    /// Mouse position in framebuffer coordinates (undoes the letterbox scaling).
+    fn mouse_fb(&self, w: &Window) -> Option<(f32, f32)> {
+        let (mx, my) = w.get_mouse_pos(minifb::MouseMode::Discard)?;
+        let (ww, wh) = (self.win.0 as f32, self.win.1 as f32);
+        let scale = (ww / W as f32).min(wh / H as f32);
+        let (ox, oy) = ((ww - W as f32 * scale) / 2.0, (wh - H as f32 * scale) / 2.0);
+        Some(((mx - ox) / scale, (my - oy) / scale))
+    }
+
     fn title_keys(&mut self, w: &Window) {
+        // clicking the name box starts editing it; clicking anywhere else stops
+        let click = w.get_mouse_down(MouseButton::Left);
+        if click && !self.title_click {
+            if let Some((x, y)) = self.mouse_fb(w) {
+                let width = (6 + self.name.chars().count().max(1) + 1) as f32 * 16.0;
+                let on_name = x >= NAME_X as f32 - 6.0 && x <= NAME_X as f32 + width && y >= NAME_Y as f32 - 6.0 && y <= NAME_Y as f32 + 22.0;
+                if on_name {
+                    self.editing_name = true;
+                } else if self.editing_name {
+                    self.editing_name = false;
+                    if self.name.trim().is_empty() {
+                        self.name = default_name();
+                    }
+                }
+            }
+        }
+        self.title_click = click;
         let shift = w.is_key_down(Key::LeftShift) || w.is_key_down(Key::RightShift);
         if self.editing_name {
             for k in w.get_keys_pressed(KeyRepeat::Yes) {
@@ -209,6 +247,7 @@ impl App {
                         self.name.pop();
                     }
                     Key::Space if self.name.len() < NAME_LEN => self.name.push(' '),
+                    Key::Minus if self.name.len() < NAME_LEN => self.name.push(if shift { '_' } else { '-' }),
                     _ => {
                         if let Some(c) = key_char(k, shift) {
                             if self.name.chars().count() < NAME_LEN {
@@ -521,6 +560,7 @@ fn main() {
         let dt = (now - last).as_secs_f32();
         last = now;
         let time = (now - start).as_secs_f32();
+        app.win = window.get_size();
         match app.screen {
             Screen::Title => app.title_keys(&window),
             Screen::Browse(..) => app.browse_keys(&window),
@@ -538,6 +578,7 @@ fn main() {
             }
         }
         let (ww, wh) = window.get_size();
+        app.win = (ww, wh);
         if ww == 0 || wh == 0 {
             window.update();
             continue;
