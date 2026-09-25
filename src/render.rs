@@ -700,7 +700,9 @@ pub fn draw_browse(fb: &mut Fb, hosts: &[crate::net::HostInfo], sel: usize, typi
     if hosts.is_empty() {
         let dots = ".".repeat(1 + (time * 2.0) as usize % 3);
         fb.text_center(W as i32 / 2, 200, &format!("Searching{dots}"), 3, 0xCFD8DC);
-        fb.text_center(W as i32 / 2, 240, "Hosts appear here automatically (IPv6 link-local multicast)", 1, 0x9FB3C8);
+        fb.text_center(W as i32 / 2, 240, "Hosts appear automatically (IPv6 link-local + IPv4 LAN broadcast)", 1, 0x9FB3C8);
+        fb.text_center(W as i32 / 2, 262, "Nothing showing? If Windows asked about the firewall, allow it on Private AND Public networks,", 1, 0x9FB3C8);
+        fb.text_center(W as i32 / 2, 276, "or press A and type the host's address (shown in its lobby).", 1, 0x9FB3C8);
     }
     for (i, h) in hosts.iter().enumerate() {
         let y = 110 + i as i32 * 40;
@@ -716,14 +718,15 @@ pub fn draw_browse(fb: &mut Fb, hosts: &[crate::net::HostInfo], sel: usize, typi
         fb.text_shadow(136, y, &h.name, 3, col);
         fb.text_shadow(520, y, &format!("{}/{}", h.players, h.max), 3, col);
         fb.text_shadow(640, y, status, 3, if h.joinable() { 0x66BB6A } else { 0xEF9A9A });
-        fb.text(136, y + 24, &h.addr.to_string(), 1, 0x78909C);
+        let addrs: Vec<String> = h.addrs.iter().map(|a| a.ip().to_string()).collect();
+        fb.text(136, y + 24, &addrs.join("   "), 1, 0x78909C);
     }
     fb.text_center(W as i32 / 2, H as i32 - 60, "Up/Down select   Enter join   R rescan   A type address   Esc back", 1, 0xCFD8DC);
     fb.text_center(W as i32 / 2, H as i32 - 40, diag, 1, 0x78909C);
     if let Some(t) = typing {
         fb.rrect(80, 170, 800, 150, 18, 0x000000, 0.85);
         fb.text_center(W as i32 / 2, 186, "JOIN BY ADDRESS", 3, 0xFFEB3B);
-        fb.text_center(W as i32 / 2, 226, "Type the host's address as shown in its lobby, e.g. fe80::1234:abcd%17", 1, 0xCFD8DC);
+        fb.text_center(W as i32 / 2, 226, "Type the host's address from its lobby: 192.168.1.5  or  fe80::1234:abcd%17", 1, 0xCFD8DC);
         let cursor = if (time * 2.0) as i32 % 2 == 0 { "_" } else { "" };
         fb.text_center(W as i32 / 2, 260, &format!("{t}{cursor}"), 2, 0xFFEB3B);
         fb.text_center(W as i32 / 2, 296, "Enter: connect   Esc: cancel   (Shift+; = colon, Shift+5 = %)", 1, 0x9FB3C8);
@@ -747,7 +750,7 @@ pub fn draw_lobby(fb: &mut Fb, gs: &GameState, me: usize, is_host: bool, port: O
         fb.text_shadow(300, y + 2, &format!("{}{tag}{you}", k.name), 2, 0xFFFFFF);
     }
     if is_host && !addrs.is_empty() {
-        fb.text_shadow(520, 160, "Others can join by address:", 1, 0x9FB3C8);
+        fb.text_shadow(520, 160, "Others can join by address (IPv6 or IPv4):", 1, 0x9FB3C8);
         for (i, a) in addrs.iter().take(6).enumerate() {
             fb.text_shadow(520, 176 + i as i32 * 14, a, 1, 0xFFFFFF);
         }

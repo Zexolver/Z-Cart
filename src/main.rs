@@ -282,7 +282,7 @@ impl App {
     }
 
     fn browse_keys(&mut self, w: &Window) {
-        let mut join: Option<std::net::SocketAddr> = None;
+        let mut join: Option<Vec<std::net::SocketAddr>> = None;
         let mut back = false;
         if self.addr_input.is_some() {
             // typing an address by hand
@@ -298,6 +298,7 @@ impl App {
                     }
                     Key::Semicolon if shift => buf.push(':'),
                     Key::Key5 if shift => buf.push('%'),
+                    Key::Period => buf.push('.'),
                     Key::Minus => buf.push(if shift { '_' } else { '-' }),
                     Key::LeftBracket if shift => buf.push('{'),
                     _ => {
@@ -315,7 +316,7 @@ impl App {
             } else if submit {
                 match parse_addr(self.addr_input.as_deref().unwrap_or("")) {
                     Ok(a) => {
-                        join = Some(a);
+                        join = Some(vec![a]);
                         self.addr_input = None;
                     }
                     Err(e) => self.msg = e,
@@ -347,7 +348,7 @@ impl App {
             if w.is_key_pressed(Key::Enter, KeyRepeat::No) {
                 if let Some(h) = b.hosts.get(*sel) {
                     if h.joinable() {
-                        join = Some(h.addr);
+                        join = Some(h.addrs.clone());
                     } else {
                         self.msg = "That game is full or already racing.".into();
                     }
@@ -355,11 +356,14 @@ impl App {
             }
             back = w.is_key_pressed(Key::Escape, KeyRepeat::No);
         }
-        if let Some(addr) = join {
-            if let Screen::Browse(b, _) = std::mem::replace(&mut self.screen, Screen::Play) {
-                let cl = Client::new(b.sock, addr, &self.name, &self.tracks[0]);
-                self.session = Session::Client { cl };
-                self.msg.clear();
+        if let Some(addrs) = join {
+            match Client::new(addrs, &self.name, &self.tracks[0]) {
+                Ok(cl) => {
+                    self.session = Session::Client { cl };
+                    self.screen = Screen::Play;
+                    self.msg.clear();
+                }
+                Err(e) => self.msg = format!("Could not open a network socket: {e}"),
             }
         } else if back {
             self.screen = Screen::Title;
@@ -488,7 +492,7 @@ impl App {
         match &self.screen {
             Screen::Title => draw_title(fb, &self.name, self.editing_name, self.mode3d, &self.msg, time),
             Screen::Browse(b, sel) => {
-                let diag = format!("scanning interfaces {:?}, {} discovery reply(ies)", b.ifaces, b.replies);
+                let diag = format!("scanning IPv6 link-local interfaces {:?} + {} IPv4 network(s); {} reply(ies)", b.ifaces, b.v4_nets, b.replies);
                 draw_browse(fb, &b.hosts, *sel, self.addr_input.as_deref(), &diag, &self.msg, time)
             }
             Screen::Play => {

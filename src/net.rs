@@ -7,7 +7,7 @@ use crate::math::*;
 use crate::sim::*;
 use crate::track::Track;
 use std::io::ErrorKind;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
 use std::time::{Duration, Instant};
 
 pub const PORT: u16 = 47777;
@@ -22,11 +22,18 @@ const T_SNAP: u8 = 7;
 const T_LEAVE: u8 = 8;
 const PEER_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Only link-local (fe80::/10) and loopback (for local testing) peers are served.
+fn lan_v4(ip: &Ipv4Addr) -> bool {
+    ip.is_private() || ip.is_loopback() || ip.is_link_local()
+}
+
+/// Only local-network peers are served: IPv6 link-local / loopback, and private IPv4 ranges.
 pub fn is_lan_addr(a: &SocketAddr) -> bool {
     match a {
-        SocketAddr::V6(v) => v.ip().is_loopback() || (v.ip().segments()[0] & 0xffc0) == 0xfe80,
-        _ => false,
+        SocketAddr::V6(v) => {
+            let ip = v.ip();
+            ip.is_loopback() || (ip.segments()[0] & 0xffc0) == 0xfe80 || ip.to_ipv4_mapped().map_or(false, |m| lan_v4(&m))
+        }
+        SocketAddr::V4(v) => lan_v4(v.ip()),
     }
 }
 
@@ -254,11 +261,100 @@ fn seq_newer(a: u32, b: u32) -> bool {
     a.wrapping_sub(b) < u32::MAX / 2 && a != b
 }
 
+// ---------------------------------------------------------------- sockets
+
+/// One IPv6 and one IPv4 UDP socket, both non-blocking. Either may be missing.
+pub struct Socks {
+    v6: Option<UdpSocket>,
+    v4: Option<UdpSocket>,
+}
+
+fn bind6(port: u16) -> std::io::Result<UdpSocket> {
+    let s = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)))?;
+    s.set_nonblocking(true)?;
+    Ok(s)
+}
+
+fn bind4(port: u16) -> std::io::Result<UdpSocket> {
+    let s = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)))?;
+    s.set_nonblocking(true)?;
+    let _ = s.set_broadcast(true);
+    Ok(s)
+}
+
+impl Socks {
+    pub fn bind(port: u16) -> std::io::Result<Socks> {
+        let v6 = bind6(port);
+        let p = v6.as_ref().ok().and_then(|s| s.local_addr().ok()).map_or(port, |a| a.port());
+        // On Linux the IPv6 socket is dual-stack, so this can fail with "in use"; that's fine.
+        let v4 = bind4(p);
+        match (v6, v4) {
+            (Err(e), Err(_)) => Err(e),
+            (a, b) => Ok(Socks { v6: a.ok(), v4: b.ok() }),
+        }
+    }
+
+    /// Two independent sockets on any free ports (clients and the browser).
+    pub fn bind_ephemeral() -> std::io::Result<Socks> {
+        match (bind6(0), bind4(0)) {
+            (Err(e), Err(_)) => Err(e),
+            (a, b) => Ok(Socks { v6: a.ok(), v4: b.ok() }),
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.v6.as_ref().or(self.v4.as_ref()).and_then(|s| s.local_addr().ok()).map_or(0, |a| a.port())
+    }
+
+    pub fn send(&self, buf: &[u8], to: SocketAddr) {
+        match to {
+            SocketAddr::V6(_) => {
+                if let Some(s) = &self.v6 {
+                    let _ = s.send_to(buf, to);
+                }
+            }
+            SocketAddr::V4(a) => {
+                if let Some(s) = &self.v4 {
+                    let _ = s.send_to(buf, to);
+                } else if let Some(s) = &self.v6 {
+                    let mapped = SocketAddr::V6(SocketAddrV6::new(a.ip().to_ipv6_mapped(), a.port(), 0, 0));
+                    let _ = s.send_to(buf, mapped);
+                }
+            }
+        }
+    }
+
+    /// Next pending datagram from either socket.
+    pub fn recv(&self, buf: &mut [u8]) -> Option<(usize, SocketAddr)> {
+        for s in [&self.v6, &self.v4].into_iter().flatten() {
+            for _ in 0..8 {
+                match s.recv_from(buf) {
+                    Ok((n, from)) => {
+                        // a dual-stack IPv6 socket reports IPv4 peers in mapped form; undo that
+                        let from = match from {
+                            SocketAddr::V6(a) => match a.ip().to_ipv4_mapped() {
+                                Some(m) => SocketAddr::V4(SocketAddrV4::new(m, a.port())),
+                                None => from,
+                            },
+                            v4 => v4,
+                        };
+                        return Some((n, from));
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(_) => continue, // e.g. Windows "connection reset" from an earlier send
+                }
+            }
+        }
+        None
+    }
+}
+
 // ---------------------------------------------------------------- discovery
 
 #[derive(Clone, Debug)]
 pub struct HostInfo {
-    pub addr: SocketAddr,
+    /// Every address this host answered from (IPv6 link-local first, then IPv4).
+    pub addrs: Vec<SocketAddr>,
     pub name: String,
     pub players: u8,
     pub max: u8,
@@ -270,12 +366,6 @@ impl HostInfo {
     pub fn joinable(&self) -> bool {
         self.phase == Phase::Lobby && self.players < self.max
     }
-}
-
-pub fn new_socket(port: u16) -> std::io::Result<UdpSocket> {
-    let s = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)))?;
-    s.set_nonblocking(true)?;
-    Ok(s)
 }
 
 /// Interface indices carrying an IPv6 link-local address.
@@ -293,9 +383,27 @@ fn link_local_ifaces() -> Vec<u32> {
     v
 }
 
+/// Directed-broadcast addresses of the local IPv4 networks.
+fn v4_broadcasts() -> Vec<Ipv4Addr> {
+    let mut v: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(a) if !a.ip.is_loopback() && lan_v4(&a.ip) => {
+                Some(a.broadcast.unwrap_or_else(|| Ipv4Addr::from(u32::from(a.ip) | !u32::from(a.netmask))))
+            }
+            _ => None,
+        })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 pub struct Browser {
-    pub sock: UdpSocket,
+    pub socks: Socks,
     pub ifaces: Vec<u32>,
+    pub v4_nets: usize,
     /// Discovery replies received so far (diagnostics).
     pub replies: u32,
     pub hosts: Vec<HostInfo>,
@@ -309,18 +417,27 @@ impl Browser {
     }
 
     pub fn with_port(port: u16) -> std::io::Result<Browser> {
-        Ok(Browser { sock: new_socket(0)?, ifaces: link_local_ifaces(), replies: 0, hosts: Vec::new(), last_query: None, port })
+        Ok(Browser { socks: Socks::bind_ephemeral()?, ifaces: link_local_ifaces(), v4_nets: 0, replies: 0, hosts: Vec::new(), last_query: None, port })
     }
 
     pub fn query(&mut self) {
         self.ifaces = link_local_ifaces();
         let pkt = W::new(T_QUERY).0;
+        // IPv6 link-local: all-nodes multicast on every interface
         let all_nodes = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
         for &idx in &self.ifaces {
-            let _ = self.sock.send_to(&pkt, SocketAddr::V6(SocketAddrV6::new(all_nodes, self.port, 0, idx)));
+            self.socks.send(&pkt, SocketAddr::V6(SocketAddrV6::new(all_nodes, self.port, 0, idx)));
         }
+        // IPv4 LAN broadcast, in case link-local multicast is filtered
+        let nets = v4_broadcasts();
+        self.v4_nets = nets.len();
+        for b in nets {
+            self.socks.send(&pkt, SocketAddr::V4(SocketAddrV4::new(b, self.port)));
+        }
+        self.socks.send(&pkt, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, self.port)));
         // same-machine hosts
-        let _ = self.sock.send_to(&pkt, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, self.port, 0, 0)));
+        self.socks.send(&pkt, SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, self.port, 0, 0)));
+        self.socks.send(&pkt, SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, self.port)));
         self.last_query = Some(Instant::now());
     }
 
@@ -331,54 +448,51 @@ impl Browser {
         }
         let mut buf = [0u8; 512];
         for _ in 0..64 {
-            match self.sock.recv_from(&mut buf) {
-                Ok((n, from)) => {
-                    if !is_lan_addr(&from) {
-                        continue;
-                    }
-                    if let Some((T_REPLY, mut r)) = parse(&buf[..n]) {
-                        self.replies += 1;
-                        let info = (|| {
-                            Some(HostInfo {
-                                addr: from,
-                                phase: Phase::from_u8(r.u8()?),
-                                players: r.u8()?,
-                                max: r.u8()?,
-                                name: r.str()?,
-                                seen: Instant::now(),
-                            })
-                        })();
-                        if let Some(info) = info {
-                            match self.hosts.iter_mut().find(|h| h.addr == from) {
-                                Some(h) => *h = info,
-                                None => self.hosts.push(info),
-                            }
+            let Some((n, from)) = self.socks.recv(&mut buf) else { break };
+            if !is_lan_addr(&from) {
+                continue;
+            }
+            if let Some((T_REPLY, mut r)) = parse(&buf[..n]) {
+                self.replies += 1;
+                let parsed = (|| Some((Phase::from_u8(r.u8()?), r.u8()?, r.u8()?, r.str()?)))();
+                let Some((phase, players, max, name)) = parsed else { continue };
+                match self.hosts.iter_mut().find(|h| h.name == name) {
+                    Some(h) => {
+                        h.phase = phase;
+                        h.players = players;
+                        h.max = max;
+                        h.seen = Instant::now();
+                        if !h.addrs.contains(&from) {
+                            h.addrs.push(from);
+                            // IPv6 first: it needs no configuration
+                            h.addrs.sort_by_key(|a| a.is_ipv4());
                         }
                     }
+                    None => self.hosts.push(HostInfo { addrs: vec![from], name, players, max, phase, seen: Instant::now() }),
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(_) => continue,
             }
         }
         self.hosts.retain(|h| h.seen.elapsed() < Duration::from_secs(6));
     }
 }
 
-/// This machine's link-local addresses as friends should type them ("fe80::1%17").
+/// This machine's LAN addresses as friends should type them ("fe80::1%17", "192.168.1.5").
 pub fn local_addr_strings() -> Vec<String> {
-    if_addrs::get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|i| match i.addr {
+    let mut out = Vec::new();
+    for i in if_addrs::get_if_addrs().unwrap_or_default() {
+        match i.addr {
             if_addrs::IfAddr::V6(a) if (a.ip.segments()[0] & 0xffc0) == 0xfe80 => {
-                Some(format!("{}%{}", a.ip, i.index.map_or(i.name.clone(), |x| x.to_string())))
+                out.push(format!("{}%{}", a.ip, i.index.map_or(i.name.clone(), |x| x.to_string())));
             }
-            _ => None,
-        })
-        .collect()
+            if_addrs::IfAddr::V4(a) if !a.ip.is_loopback() && lan_v4(&a.ip) => out.push(a.ip.to_string()),
+            _ => {}
+        }
+    }
+    out
 }
 
-/// Parses "fe80::1%17", "fe80::1%eth0" or "[fe80::1%17]:47777" (zone = interface number or name).
+/// Parses "192.168.1.5", "fe80::1%17", "fe80::1%eth0" or "[fe80::1%17]:47777"
+/// (zone = interface number or name). Only LAN addresses are accepted.
 pub fn parse_addr(text: &str) -> Result<SocketAddr, String> {
     let t = text.trim();
     let (host, port) = match t.strip_prefix('[') {
@@ -390,16 +504,27 @@ pub fn parse_addr(text: &str) -> Result<SocketAddr, String> {
             };
             (h, port)
         }
+        None if t.matches(':').count() == 1 => {
+            let (h, p) = t.split_once(':').unwrap();
+            (h, p.parse::<u16>().map_err(|_| "bad port")?)
+        }
         None => (t, PORT),
     };
+    if let Ok(v4) = host.parse::<Ipv4Addr>() {
+        return if lan_v4(&v4) {
+            Ok(SocketAddr::V4(SocketAddrV4::new(v4, port)))
+        } else {
+            Err("only local-network IPv4 addresses (192.168.x.x, 10.x.x.x, ...) are supported".into())
+        };
+    }
     let (ip_s, zone_s) = match host.split_once('%') {
         Some((a, z)) => (a, Some(z)),
         None => (host, None),
     };
-    let ip: Ipv6Addr = ip_s.parse().map_err(|_| "not an IPv6 address".to_string())?;
+    let ip: Ipv6Addr = ip_s.parse().map_err(|_| "not an IPv4 or IPv6 address".to_string())?;
     let link_local = (ip.segments()[0] & 0xffc0) == 0xfe80;
     if !link_local && !ip.is_loopback() {
-        return Err("only fe80:: link-local addresses are supported".into());
+        return Err("only fe80:: link-local IPv6 addresses are supported".into());
     }
     let zone = match zone_s {
         Some(z) => match z.parse::<u32>() {
@@ -428,29 +553,25 @@ pub struct Peer {
 }
 
 pub struct Host {
-    sock: UdpSocket,
+    socks: Socks,
     pub peers: Vec<Peer>,
     seq: u32,
 }
 
 impl Host {
     pub fn bind(port: u16) -> std::io::Result<Host> {
-        Ok(Host { sock: new_socket(port)?, peers: Vec::new(), seq: 0 })
+        Ok(Host { socks: Socks::bind(port)?, peers: Vec::new(), seq: 0 })
     }
 
     #[cfg(test)]
     pub fn port(&self) -> u16 {
-        self.sock.local_addr().map(|a| a.port()).unwrap_or(0)
+        self.socks.port()
     }
 
     pub fn poll(&mut self, gs: &mut GameState, tr: &Track) {
         let mut buf = [0u8; 512];
         for _ in 0..512 {
-            let (n, from) = match self.sock.recv_from(&mut buf) {
-                Ok(v) => v,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(_) => continue,
-            };
+            let Some((n, from)) = self.socks.recv(&mut buf) else { break };
             if !is_lan_addr(&from) {
                 continue;
             }
@@ -462,7 +583,7 @@ impl Host {
                     w.u8(gs.humans() as u8);
                     w.u8(MAX_KARTS as u8);
                     w.str(gs.karts.first().map_or("Host", |k| k.name.as_str()));
-                    let _ = self.sock.send_to(&w.0, from);
+                    self.socks.send(&w.0, from);
                 }
                 T_JOIN => {
                     if let Some(p) = self.peers.iter().find(|p| p.addr == from) {
@@ -535,20 +656,20 @@ impl Host {
     fn welcome(&self, to: SocketAddr, id: usize) {
         let mut w = W::new(T_WELCOME);
         w.u8(id as u8);
-        let _ = self.sock.send_to(&w.0, to);
+        self.socks.send(&w.0, to);
     }
 
     fn reject(&self, to: SocketAddr, why: u8) {
         let mut w = W::new(T_REJECT);
         w.u8(why);
-        let _ = self.sock.send_to(&w.0, to);
+        self.socks.send(&w.0, to);
     }
 
     pub fn broadcast(&mut self, gs: &GameState) {
         self.seq = self.seq.wrapping_add(1);
         for p in &self.peers {
             let pkt = encode_snapshot(gs, self.seq, p.kart);
-            let _ = self.sock.send_to(&pkt, p.addr);
+            self.socks.send(&pkt, p.addr);
         }
     }
 
@@ -556,7 +677,7 @@ impl Host {
     pub fn shutdown(&mut self) {
         let pkt = W::new(T_LEAVE).0;
         for p in &self.peers {
-            let _ = self.sock.send_to(&pkt, p.addr);
+            self.socks.send(&pkt, p.addr);
         }
     }
 }
@@ -564,8 +685,12 @@ impl Host {
 // ---------------------------------------------------------------- client
 
 pub struct Client {
-    sock: UdpSocket,
-    host: SocketAddr,
+    socks: Socks,
+    /// Addresses to try for the host (e.g. its link-local IPv6 first, then its IPv4).
+    cands: Vec<SocketAddr>,
+    cur: usize,
+    locked: bool,
+    last_switch: Instant,
     name: String,
     pub id: Option<usize>,
     pub state: GameState,
@@ -579,10 +704,13 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(sock: UdpSocket, host: SocketAddr, name: &str, tr: &Track) -> Client {
+    pub fn new(cands: Vec<SocketAddr>, name: &str, tr: &Track) -> std::io::Result<Client> {
         let mut c = Client {
-            sock,
-            host,
+            socks: Socks::bind_ephemeral()?,
+            cands,
+            cur: 0,
+            locked: false,
+            last_switch: Instant::now(),
             name: name.to_string(),
             id: None,
             state: GameState::new(tr),
@@ -595,25 +723,31 @@ impl Client {
             started: Instant::now(),
         };
         c.send_join();
-        c
+        Ok(c)
+    }
+
+    fn host(&self) -> SocketAddr {
+        self.cands[self.cur]
     }
 
     fn send_join(&mut self) {
         let mut w = W::new(T_JOIN);
         w.str(&self.name);
-        let _ = self.sock.send_to(&w.0, self.host);
+        self.socks.send(&w.0, self.host());
         self.last_join = Instant::now();
     }
 
     pub fn poll(&mut self) {
         let mut buf = [0u8; 2048];
         for _ in 0..256 {
-            let (n, from) = match self.sock.recv_from(&mut buf) {
-                Ok(v) => v,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(_) => continue,
-            };
-            if from != self.host {
+            let Some((n, from)) = self.socks.recv(&mut buf) else { break };
+            let Some(ci) = self.cands.iter().position(|c| *c == from) else { continue };
+            if !self.locked {
+                // first address that answers wins
+                self.locked = true;
+                self.cur = ci;
+            }
+            if ci != self.cur {
                 continue;
             }
             let Some((t, mut r)) = parse(&buf[..n]) else { continue };
@@ -634,8 +768,14 @@ impl Client {
                 _ => {}
             }
         }
-        if self.id.is_none() && self.rejected.is_none() && self.last_join.elapsed() > Duration::from_millis(500) {
-            self.send_join();
+        if self.id.is_none() && self.rejected.is_none() {
+            if !self.locked && self.cands.len() > 1 && self.last_switch.elapsed() > Duration::from_millis(1200) {
+                self.cur = (self.cur + 1) % self.cands.len();
+                self.last_switch = Instant::now();
+                self.send_join();
+            } else if self.last_join.elapsed() > Duration::from_millis(400) {
+                self.send_join();
+            }
         }
         let silent = self.snap_at.map_or(self.started, |t| t).elapsed();
         if silent > Duration::from_secs(5) {
@@ -654,11 +794,11 @@ impl Client {
         w.u8(inp.throttle as u8 | (inp.brake as u8) << 1 | (inp.drift as u8) << 2 | (inp.back as u8) << 3);
         w.u8(inp.use_seq);
         w.u8(inp.swap_seq);
-        let _ = self.sock.send_to(&w.0, self.host);
+        self.socks.send(&w.0, self.host());
     }
 
     pub fn leave(&self) {
-        let _ = self.sock.send_to(&W::new(T_LEAVE).0, self.host);
+        self.socks.send(&W::new(T_LEAVE).0, self.host());
     }
 }
 
@@ -666,8 +806,7 @@ impl Client {
 mod tests {
     use super::*;
 
-    #[test]
-    fn discover_join_and_sync_over_loopback() {
+    fn run_session(via_v4: bool) {
         let tr = Track::new();
         let mut gs = GameState::new(&tr);
         gs.add_human(&tr, "HostGuy");
@@ -684,8 +823,15 @@ mod tests {
         assert_eq!(br.hosts[0].name, "HostGuy");
         assert!(br.hosts[0].joinable());
 
-        let addr = br.hosts[0].addr;
-        let mut cl = Client::new(br.sock, addr, "Guest", &tr);
+        // pick the address family under test
+        let addrs = br.hosts[0].addrs.clone();
+        let cands: Vec<SocketAddr> = if via_v4 {
+            vec![SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))]
+        } else {
+            addrs.iter().copied().filter(|a| a.is_ipv6()).collect()
+        };
+        assert!(!cands.is_empty());
+        let mut cl = Client::new(cands.clone(), "Guest", &tr).unwrap();
         std::thread::sleep(Duration::from_millis(50));
         host.poll(&mut gs, &tr);
         assert_eq!(gs.humans(), 2);
@@ -714,12 +860,45 @@ mod tests {
         assert!((cl.state.karts[0].pos.x - gs.karts[0].pos.x).abs() < 1e-3);
 
         // late joiners are turned away
-        let mut late = Client::new(new_socket(0).unwrap(), addr, "Late", &tr);
+        let mut late = Client::new(cands, "Late", &tr).unwrap();
         std::thread::sleep(Duration::from_millis(50));
         host.poll(&mut gs, &tr);
         std::thread::sleep(Duration::from_millis(50));
         late.poll();
         assert_eq!(late.rejected, Some(1));
+    }
+
+    #[test]
+    fn discover_join_and_sync_over_ipv6() {
+        run_session(false);
+    }
+
+    #[test]
+    fn join_and_sync_over_ipv4() {
+        run_session(true);
+    }
+
+    #[test]
+    fn client_falls_back_to_second_address() {
+        let tr = Track::new();
+        let mut gs = GameState::new(&tr);
+        gs.add_human(&tr, "HostGuy");
+        let mut host = Host::bind(0).expect("bind");
+        let port = host.port();
+        // first candidate goes nowhere (nothing listens on that port), second is the host
+        let dead = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, if port == 1 { 2 } else { 1 }, 0, 0));
+        let live = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
+        let mut cl = Client::new(vec![dead, live], "Guest", &tr).unwrap();
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(50));
+            host.poll(&mut gs, &tr);
+            host.broadcast(&gs);
+            cl.poll();
+            if cl.id.is_some() {
+                break;
+            }
+        }
+        assert_eq!(cl.id, Some(1), "client never reached the host through its fallback address");
     }
 
     #[test]
@@ -749,8 +928,11 @@ mod tests {
         let b = parse_addr(" [fe80::1%3]:5000 ").unwrap();
         assert_eq!(b.port(), 5000);
         assert!(parse_addr("fe80::1").is_err(), "zone required");
-        assert!(parse_addr("192.168.0.2").is_err());
         assert!(parse_addr("2001:db8::1").is_err());
         assert!(parse_addr("::1").is_ok());
+        assert_eq!(parse_addr("192.168.1.20").unwrap(), "192.168.1.20:47777".parse::<SocketAddr>().unwrap());
+        assert_eq!(parse_addr("10.0.0.5:5000").unwrap().port(), 5000);
+        assert!(parse_addr("8.8.8.8").is_err(), "public addresses are refused");
     }
 }
+

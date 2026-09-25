@@ -19,7 +19,8 @@ Dependencies: `minifb` (window), `if-addrs` (interface list), `font8x8` (font da
 ## Multiplayer
 * **H** on the title screen hosts (UDP port 47777); the host also runs the simulation and can add bots (**B**) / change laps (**L**) in the lobby.
 * **J** lists games found on the LAN (link-local multicast `ff02::1` discovery). Enter joins.
-* Only `fe80::/10` link-local (and loopback, for local testing) peers are accepted.
+* Discovery uses IPv6 link-local multicast **and** IPv4 LAN broadcast; a joining client tries the host's IPv6 link-local address first and falls back to its IPv4 address automatically. You can also press **A** on the Join screen and type an address (`192.168.1.5` or `fe80::1234%17`).
+* Only LAN peers are accepted: `fe80::/10` link-local IPv6 and private IPv4 ranges (plus loopback for local testing).
 * Windows may show a firewall prompt the first time you host; allow it on *Private* networks (no admin required for the game itself).
 * Up to 8 karts (players + bots). Late joiners can't enter a race in progress.
 
