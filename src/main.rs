@@ -112,13 +112,12 @@ impl App {
         }
         self.prev_left = left;
         self.prev_right = right;
-        let (fwd, back) = (down(Key::W, Key::Up), down(Key::S, Key::Down));
         Input {
             steer: down(Key::D, Key::Right) as i32 as f32 - down(Key::A, Key::Left) as i32 as f32,
-            throttle: fwd,
-            brake: back,
+            throttle: down(Key::W, Key::Up),
+            brake: down(Key::S, Key::Down),
             drift: down(Key::LeftShift, Key::RightShift),
-            aim: if fwd && !back { 1 } else if back && !fwd { -1 } else { 0 },
+            flip: w.is_key_down(Key::Space) || w.get_mouse_down(MouseButton::Middle),
             use_seq: self.use_seq,
             swap_seq: self.swap_seq,
         }
@@ -282,7 +281,7 @@ impl App {
     /// One frame of in-game logic. `dt` is the real frame time.
     fn play_frame(&mut self, w: &Window, dt: f32) {
         let inp = self.read_input(w);
-        if w.is_key_pressed(Key::C, KeyRepeat::No) {
+        if w.is_key_pressed(Key::V, KeyRepeat::No) {
             self.mode3d = !self.mode3d;
         }
         let esc = w.is_key_pressed(Key::Escape, KeyRepeat::No);
@@ -474,6 +473,31 @@ fn screenshot(path: &str, three_d: bool, track: usize, extra: &str) {
     std::fs::write(path, out).expect("write screenshot");
 }
 
+/// Scales the fixed-size frame into a window-sized buffer, letterboxed. Doing this
+/// ourselves (instead of letting the window library stretch it) keeps maximized windows correct.
+fn present(src: &[u32], ww: usize, wh: usize, out: &mut Vec<u32>) {
+    out.clear();
+    out.resize(ww * wh, 0);
+    let scale = (ww as f32 / W as f32).min(wh as f32 / H as f32);
+    let (dw, dh) = (((W as f32 * scale) as usize).max(1), ((H as f32 * scale) as usize).max(1));
+    let (ox, oy) = ((ww - dw.min(ww)) / 2, (wh - dh.min(wh)) / 2);
+    let xmap: Vec<usize> = (0..dw).map(|x| x * W / dw).collect();
+    let mut prev_sy = usize::MAX;
+    for y in 0..dh.min(wh) {
+        let sy = y * H / dh;
+        let row = (oy + y) * ww + ox;
+        if sy == prev_sy {
+            out.copy_within(row - ww..row - ww + dw.min(ww), row);
+        } else {
+            let srow = &src[sy * W..(sy + 1) * W];
+            for (x, &sx) in xmap.iter().enumerate().take(ww) {
+                out[row + x] = srow[sx];
+            }
+            prev_sy = sy;
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--shot" {
@@ -483,11 +507,12 @@ fn main() {
         "Z-Cart",
         W,
         H,
-        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::AspectRatioStretch, ..WindowOptions::default() },
+        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() },
     )
     .expect("could not open a window");
     window.set_target_fps(60);
     let mut fb = Fb::new();
+    let mut out: Vec<u32> = Vec::new();
     let mut app = App::new();
     let start = Instant::now();
     let mut last = start;
@@ -512,7 +537,32 @@ fn main() {
                 }
             }
         }
-        window.update_with_buffer(&fb.px, W, H).expect("present failed");
+        let (ww, wh) = window.get_size();
+        if ww == 0 || wh == 0 {
+            window.update();
+            continue;
+        }
+        present(&fb.px, ww, wh, &mut out);
+        window.update_with_buffer(&out, ww, wh).expect("present failed");
     }
     app.leave();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn present_letterboxes_any_window_size() {
+        let src = vec![0xFF00FF; W * H];
+        let mut out = Vec::new();
+        for (ww, wh) in [(960, 540), (1920, 1080), (2560, 900), (500, 1400), (3, 3), (1, 1)] {
+            present(&src, ww, wh, &mut out);
+            assert_eq!(out.len(), ww * wh);
+            assert_eq!(out[(wh / 2) * ww + ww / 2], 0xFF00FF, "{ww}x{wh}: centre must be picture");
+        }
+        present(&src, 2560, 900, &mut out);
+        assert_eq!(out[450 * 2560 + 10], 0, "side bars are black, picture is centred");
+        assert_eq!(out[450 * 2560 + 2550], 0);
+    }
 }

@@ -163,8 +163,8 @@ pub struct Input {
     pub throttle: bool,
     pub brake: bool,
     pub drift: bool,
-    /// Throw direction held while clicking: +1 forward (W), -1 backward (S).
-    pub aim: i8,
+    /// Throw the opposite way to the item's default (Space / middle click while using it).
+    pub flip: bool,
     /// Click counters: wrapping, so a lost packet never loses a click.
     pub use_seq: u8,
     pub swap_seq: u8,
@@ -624,6 +624,37 @@ impl GameState {
             }
         }
         keep.extend(std::mem::take(&mut self.ents));
+        // shells break each other; peels and decoys block shells (both are destroyed)
+        let shell = |k: EntKind| matches!(k, EntKind::Bouncer | EntKind::Seeker);
+        let blocker = |k: EntKind| matches!(k, EntKind::Peel | EntKind::Decoy);
+        let mut dead = vec![false; keep.len()];
+        let mut pops = Vec::new();
+        for i in 0..keep.len() {
+            for j in i + 1..keep.len() {
+                let (a, b) = (&keep[i], &keep[j]);
+                if dead[i] || dead[j] {
+                    continue;
+                }
+                let clash = (shell(a.kind) && (shell(b.kind) || blocker(b.kind))) || (blocker(a.kind) && shell(b.kind));
+                let fresh_same_owner = a.owner == b.owner && a.age.min(b.age) < 0.5;
+                if clash && !fresh_same_owner && a.pos.dist(b.pos) < 17.0 {
+                    dead[i] = true;
+                    dead[j] = true;
+                    pops.push((a.pos + b.pos) * 0.5);
+                }
+            }
+        }
+        let mut idx = 0;
+        keep.retain(|_| {
+            idx += 1;
+            !dead[idx - 1]
+        });
+        for p in pops {
+            let mut pop = Ent::new(EntKind::Blast, p, V2::ZERO, 255);
+            pop.timer = 0.3;
+            pop.age = 24.0;
+            keep.push(pop);
+        }
         keep.truncate(MAX_ENTS);
         self.ents = keep;
 
@@ -717,14 +748,14 @@ impl GameState {
         let k = &self.karts[i];
         let fwd = V2::from_angle(k.heading);
         let (pos, sc, run, vel) = (k.pos, k.scale(), k.run, k.vel);
-        let aim = k.input.aim;
+        let flip = k.input.flip;
         let behind = pos - fwd * (30.0 * sc);
         let ahead = pos + fwd * (30.0 * sc);
         match item {
             Item::Peel | Item::TriplePeel | Item::Decoy => {
                 // dropped behind by default, lobbed ahead when holding forward
                 let kind = if item == Item::Decoy { EntKind::Decoy } else { EntKind::Peel };
-                let mut e = if aim > 0 {
+                let mut e = if flip {
                     Ent::new(kind, ahead, fwd * 520.0 + vel * 0.5, i)
                 } else {
                     Ent::new(kind, behind, V2::ZERO, i)
@@ -733,12 +764,12 @@ impl GameState {
                 self.spawn(e);
             }
             Item::Bouncer | Item::TripleBouncer => {
-                let dir = if aim < 0 { -fwd } else { fwd };
-                let from = if aim < 0 { behind } else { ahead };
+                let dir = if flip { -fwd } else { fwd };
+                let from = if flip { behind } else { ahead };
                 self.spawn(Ent::new(EntKind::Bouncer, from, dir * 640.0, i));
             }
             Item::Seeker => {
-                let back = aim < 0;
+                let back = flip;
                 let dir = if back { -fwd } else { fwd };
                 let mut e = Ent::new(EntKind::Seeker, if back { behind } else { ahead }, dir * 540.0, i);
                 e.target = if back { self.nearest_behind(i) } else { self.nearest_ahead(i) };
@@ -753,7 +784,7 @@ impl GameState {
                 self.spawn(e);
             }
             Item::Bomb => {
-                let mut e = if aim < 0 {
+                let mut e = if flip {
                     Ent::new(EntKind::Bomb, behind, -fwd * 300.0 + vel * 0.5, i)
                 } else {
                     Ent::new(EntKind::Bomb, ahead, fwd * 380.0 + vel * 0.5, i)
@@ -1187,26 +1218,26 @@ mod tests {
         }
         let fwd = V2::from_angle(g.karts[0].heading);
         let cases = [
-            (Item::Peel, 1, true),
-            (Item::Peel, 0, false),
-            (Item::Bouncer, 0, true),
-            (Item::Bouncer, -1, false),
-            (Item::Bomb, 0, true),
-            (Item::Bomb, -1, false),
+            (Item::Peel, true, true),
+            (Item::Peel, false, false),
+            (Item::Bouncer, false, true),
+            (Item::Bouncer, true, false),
+            (Item::Bomb, false, true),
+            (Item::Bomb, true, false),
         ];
-        for (item, aim, ahead) in cases {
+        for (item, flip, ahead) in cases {
             g.ents.clear();
             g.karts[0].slots[0] = (item as u8, 1);
-            g.karts[0].input.aim = aim;
+            g.karts[0].input.flip = flip;
             g.karts[0].input.use_seq = g.karts[0].input.use_seq.wrapping_add(1);
             let origin = g.karts[0].pos;
             g.step(&tr);
             for _ in 0..8 {
                 g.step(&tr);
             }
-            let e = g.ents.first().unwrap_or_else(|| panic!("{item:?} aim {aim}: nothing spawned; spin {} slots {:?} phase {:?} lastuse {} inp {}", g.karts[0].spin, g.karts[0].slots, g.phase, g.karts[0].last_use, g.karts[0].input.use_seq));
+            let e = g.ents.first().unwrap_or_else(|| panic!("{item:?} flip {flip}: nothing spawned; spin {} slots {:?} phase {:?} lastuse {} inp {}", g.karts[0].spin, g.karts[0].slots, g.phase, g.karts[0].last_use, g.karts[0].input.use_seq));
             let side = (e.pos - g.karts[0].pos).dot(fwd);
-            assert_eq!(side > 0.0, ahead, "{item:?} aim {aim}: rel {side} origin {:?}", origin);
+            assert_eq!(side > 0.0, ahead, "{item:?} flip {flip}: rel {side} origin {:?}", origin);
         }
     }
 
@@ -1280,5 +1311,45 @@ mod tests {
             plain = plain.max(k2.speed());
         }
         assert!(top > plain + 20.0, "combo {top} vs plain boost {plain}");
+    }
+
+    fn ent_at(kind: EntKind, pos: V2, vel: V2, owner: usize) -> Ent {
+        let mut e = Ent::new(kind, pos, vel, owner);
+        e.age = 1.0;
+        e
+    }
+
+    #[test]
+    fn shells_break_each_other() {
+        let tr = Track::new();
+        let mut g = GameState::new(&tr);
+        g.bots = 0;
+        g.add_human(&tr, "a");
+        g.start_race(&tr);
+        let p = tr.pt(400);
+        let t = tr.tangent(400);
+        g.ents.push(ent_at(EntKind::Bouncer, p, t * 300.0, 5));
+        g.ents.push(ent_at(EntKind::Seeker, p + t * 60.0, -t * 300.0, 6));
+        for _ in 0..40 {
+            g.step(&tr);
+        }
+        assert!(g.ents.iter().all(|e| !matches!(e.kind, EntKind::Bouncer | EntKind::Seeker)), "shells survived a head-on collision");
+    }
+
+    #[test]
+    fn peels_stop_shells_and_both_break() {
+        let tr = Track::new();
+        let mut g = GameState::new(&tr);
+        g.bots = 0;
+        g.add_human(&tr, "a");
+        g.start_race(&tr);
+        let p = tr.pt(400);
+        let t = tr.tangent(400);
+        g.ents.push(ent_at(EntKind::Peel, p + t * 60.0, V2::ZERO, 5));
+        g.ents.push(ent_at(EntKind::Bouncer, p, t * 400.0, 6));
+        for _ in 0..40 {
+            g.step(&tr);
+        }
+        assert!(g.ents.iter().all(|e| matches!(e.kind, EntKind::Blast)), "peel/shell should both be gone: {:?}", g.ents.iter().map(|e| e.kind).collect::<Vec<_>>());
     }
 }

@@ -1,7 +1,7 @@
 # Z-Cart
 
 A top-down kart racer in Rust with peer-hosted LAN play over **IPv6 link-local** addresses.
-Two views, both software-rendered (no GPU engine): a 3D chase camera (default) and the original 2D top-down view. Switch with **V** on the title screen or **C** in game; no admin/sudo needed on Linux or Windows.
+Two views, both software-rendered (no GPU engine): a 3D chase camera (default) and the original 2D top-down view. Switch with **V** on the title screen or in game; no admin/sudo needed on Linux or Windows.
 
 Dependencies: `minifb` (window), `if-addrs` (interface list), `font8x8` (font data). Networking is `std::net` only.
 
@@ -67,7 +67,7 @@ view is scaled to fit while keeping its aspect ratio.
 Meadow Circuit, Dune Drift, Frost Ridge and Neon Nights, each with its own scenery and picnic-style clearings. The host picks a track (or **Random**) with **T** in the lobby.
 
 ## Aiming items
-Left click uses the primary item. Peels, Decoys, Bouncers, Seekers and Bombs go their default way (Peel/Decoy dropped behind, the rest thrown forward); hold **W** while clicking to lob a Peel/Decoy forward, or **S** to throw Bouncers, Seekers and Bombs backward.
+Left click uses the primary item. Peels and Decoys are dropped behind, Bouncers, Seekers and Bombs go forward. Hold **Space** (or use middle-click) while using an item to throw it the other way: lob a Peel/Decoy forward, or fire a shell/bomb backward. Shells destroy each other on contact, and a Peel or Decoy stops a shell (both break).
 
 ## Gameplay notes
 * Spin-outs are cosmetic: the kart whirls in place and always ends up facing the way it was going.
