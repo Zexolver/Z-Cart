@@ -439,7 +439,7 @@ impl Host {
                             throttle: flags & 1 != 0,
                             brake: flags & 2 != 0,
                             drift: flags & 4 != 0,
-                            flip: flags & 8 != 0,
+                            back: flags & 8 != 0,
                             use_seq,
                             swap_seq,
                         };
@@ -595,7 +595,7 @@ impl Client {
         let mut w = W::new(T_INPUT);
         w.u16(self.out_seq);
         w.u8((inp.steer.clamp(-1.0, 1.0) * 127.0) as i8 as u8);
-        w.u8(inp.throttle as u8 | (inp.brake as u8) << 1 | (inp.drift as u8) << 2 | (inp.flip as u8) << 3);
+        w.u8(inp.throttle as u8 | (inp.brake as u8) << 1 | (inp.drift as u8) << 2 | (inp.back as u8) << 3);
         w.u8(inp.use_seq);
         w.u8(inp.swap_seq);
         let _ = self.sock.send_to(&w.0, self.host);

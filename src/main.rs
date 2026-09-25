@@ -117,7 +117,7 @@ impl App {
             throttle: down(Key::W, Key::Up),
             brake: down(Key::S, Key::Down),
             drift: down(Key::LeftShift, Key::RightShift),
-            flip: w.is_key_down(Key::Space) || w.get_mouse_down(MouseButton::Middle),
+            back: w.is_key_down(Key::Space) || w.get_mouse_down(MouseButton::Middle),
             use_seq: self.use_seq,
             swap_seq: self.swap_seq,
         }

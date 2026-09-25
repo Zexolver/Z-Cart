@@ -592,7 +592,7 @@ pub fn draw_hud(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, k: &Kart, ti
     slot(fb, k.slots[0], bx as f32 + 30.0, 36.0, 24.0, time);
     fb.rrect(bx + 66, 30, 36, 36, 10, 0x000000, 0.4);
     slot(fb, k.slots[1], bx as f32 + 84.0, 48.0, 13.0, time);
-    fb.text_center(W as i32 / 2, 92, "L-click use (+Space: throw other way)   R-click swap", 1, 0xDDDDDD);
+    fb.text_center(W as i32 / 2, 92, "L-click use (hold Space: throw backward)   R-click swap", 1, 0xDDDDDD);
 
     minimap(fb, tr, gs, me);
 
@@ -681,7 +681,7 @@ pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, mode3d: bool, msg: &st
     }
     fb.text_shadow(300, 364, &format!("Name: {name}{cursor}"), 2, if editing { 0xFFEB3B } else { 0xCFD8DC });
     fb.text_center(W as i32 / 2, 404, "DRIVE: WASD / arrows   DRIFT: hold Shift   V: switch view", 1, 0xCFD8DC);
-    fb.text_center(W as i32 / 2, 428, "USE ITEM: left click (hold Space or middle-click: throw the other way)   SWAP SLOT: right click", 1, 0xCFD8DC);
+    fb.text_center(W as i32 / 2, 428, "USE ITEM: left click (hold Space: throw backward)   SWAP SLOT: right click", 1, 0xCFD8DC);
     fb.text_center(W as i32 / 2, 466, "Items: Peel Bouncer Seeker Nova Turbo Giant Star Bomb Decoy Zap Rocket Ink Nitro", 1, 0x9FB3C8);
     if !msg.is_empty() {
         fb.text_center(W as i32 / 2, 496, msg, 2, 0xFF8A80);

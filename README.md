@@ -67,9 +67,10 @@ view is scaled to fit while keeping its aspect ratio.
 Meadow Circuit, Dune Drift, Frost Ridge and Neon Nights, each with its own scenery and picnic-style clearings. The host picks a track (or **Random**) with **T** in the lobby.
 
 ## Aiming items
-Left click uses the primary item. Peels and Decoys are dropped behind, Bouncers, Seekers and Bombs go forward. Hold **Space** (or use middle-click) while using an item to throw it the other way: lob a Peel/Decoy forward, or fire a shell/bomb backward. Shells destroy each other on contact, and a Peel or Decoy stops a shell (both break).
+Left click uses the primary item and throws it **forward**; hold **Space** (or middle-click) while using it to throw/drop it **backward**. This applies to Peels, Decoys, Bouncers, Seekers and Bombs. Shells destroy each other on contact, and a Peel or Decoy stops a shell (both break).
 
 ## Gameplay notes
 * Spin-outs are cosmetic: the kart whirls in place and always ends up facing the way it was going.
 * A flashing WRONG WAY warning appears when you're driving against the track direction.
+* Star and Giant each give a speed buff that stacks with item boosts and boost pads.
 * Using a speed boost while driving onto a boost pad gives a brief extra burst of speed.

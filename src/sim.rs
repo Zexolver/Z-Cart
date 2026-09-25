@@ -163,8 +163,8 @@ pub struct Input {
     pub throttle: bool,
     pub brake: bool,
     pub drift: bool,
-    /// Throw the opposite way to the item's default (Space / middle click while using it).
-    pub flip: bool,
+    /// Throw backwards (Space / middle click held while using an item); otherwise forwards.
+    pub back: bool,
     /// Click counters: wrapping, so a lost packet never loses a click.
     pub use_seq: u8,
     pub swap_seq: u8,
@@ -748,28 +748,28 @@ impl GameState {
         let k = &self.karts[i];
         let fwd = V2::from_angle(k.heading);
         let (pos, sc, run, vel) = (k.pos, k.scale(), k.run, k.vel);
-        let flip = k.input.flip;
+        let back = k.input.back;
         let behind = pos - fwd * (30.0 * sc);
         let ahead = pos + fwd * (30.0 * sc);
         match item {
             Item::Peel | Item::TriplePeel | Item::Decoy => {
-                // dropped behind by default, lobbed ahead when holding forward
+                // lobbed ahead by default, dropped behind when throwing backwards
                 let kind = if item == Item::Decoy { EntKind::Decoy } else { EntKind::Peel };
-                let mut e = if flip {
-                    Ent::new(kind, ahead, fwd * 520.0 + vel * 0.5, i)
-                } else {
+                let mut e = if back {
                     Ent::new(kind, behind, V2::ZERO, i)
+                } else {
+                    Ent::new(kind, ahead, fwd * 520.0 + vel * 0.5, i)
                 };
                 e.timer = 0.6;
                 self.spawn(e);
             }
             Item::Bouncer | Item::TripleBouncer => {
-                let dir = if flip { -fwd } else { fwd };
-                let from = if flip { behind } else { ahead };
+                let dir = if back { -fwd } else { fwd };
+                let from = if back { behind } else { ahead };
                 self.spawn(Ent::new(EntKind::Bouncer, from, dir * 640.0, i));
             }
             Item::Seeker => {
-                let back = flip;
+                let back = back;
                 let dir = if back { -fwd } else { fwd };
                 let mut e = Ent::new(EntKind::Seeker, if back { behind } else { ahead }, dir * 540.0, i);
                 e.target = if back { self.nearest_behind(i) } else { self.nearest_ahead(i) };
@@ -784,7 +784,7 @@ impl GameState {
                 self.spawn(e);
             }
             Item::Bomb => {
-                let mut e = if flip {
+                let mut e = if back {
                     Ent::new(EntKind::Bomb, behind, -fwd * 300.0 + vel * 0.5, i)
                 } else {
                     Ent::new(EntKind::Bomb, ahead, fwd * 380.0 + vel * 0.5, i)
@@ -994,6 +994,7 @@ fn bot_wants_item(k: &mut Kart, all: &[Kart], me: usize, rng: &mut u64) -> bool 
             j != me && d.len() < range && (d.dot(fwd) > 0.0) == ahead
         })
     };
+    k.input.back = matches!(item, Item::Peel | Item::TriplePeel | Item::Decoy | Item::Bomb);
     let go = match item {
         Item::Peel | Item::TriplePeel | Item::Decoy | Item::Bomb => near(false, 260.0),
         Item::Bouncer | Item::TripleBouncer | Item::Seeker => near(true, 520.0),
@@ -1039,7 +1040,10 @@ fn drive(
         maxs *= 0.5;
     }
     if k.star > 0.0 {
-        maxs *= 1.15;
+        maxs *= 1.2;
+    }
+    if k.giant > 0.0 {
+        maxs *= 1.2;
     }
     if k.shrunk > 0.0 {
         maxs *= 0.75;
@@ -1099,7 +1103,7 @@ fn drive(
         vf = k.vel.dot(fwd);
         let mut vl = k.vel.dot(rgt);
         let throttle = racing && (inp.throttle || k.rocket > 0.0);
-        let accel = if boosting { 700.0 } else { 250.0 } * if k.giant > 0.0 { 0.8 } else { 1.0 };
+        let accel = if boosting { 700.0 } else { 250.0 };
         if throttle {
             if vf < maxs {
                 vf = (vf + accel * DT).min(maxs);
@@ -1218,26 +1222,26 @@ mod tests {
         }
         let fwd = V2::from_angle(g.karts[0].heading);
         let cases = [
-            (Item::Peel, true, true),
-            (Item::Peel, false, false),
+            (Item::Peel, false, true),
+            (Item::Peel, true, false),
             (Item::Bouncer, false, true),
             (Item::Bouncer, true, false),
             (Item::Bomb, false, true),
             (Item::Bomb, true, false),
         ];
-        for (item, flip, ahead) in cases {
+        for (item, back, ahead) in cases {
             g.ents.clear();
             g.karts[0].slots[0] = (item as u8, 1);
-            g.karts[0].input.flip = flip;
+            g.karts[0].input.back = back;
             g.karts[0].input.use_seq = g.karts[0].input.use_seq.wrapping_add(1);
             let origin = g.karts[0].pos;
             g.step(&tr);
             for _ in 0..8 {
                 g.step(&tr);
             }
-            let e = g.ents.first().unwrap_or_else(|| panic!("{item:?} flip {flip}: nothing spawned; spin {} slots {:?} phase {:?} lastuse {} inp {}", g.karts[0].spin, g.karts[0].slots, g.phase, g.karts[0].last_use, g.karts[0].input.use_seq));
+            let e = g.ents.first().unwrap_or_else(|| panic!("{item:?} back {back}: nothing spawned; spin {} slots {:?} phase {:?} lastuse {} inp {}", g.karts[0].spin, g.karts[0].slots, g.phase, g.karts[0].last_use, g.karts[0].input.use_seq));
             let side = (e.pos - g.karts[0].pos).dot(fwd);
-            assert_eq!(side > 0.0, ahead, "{item:?} flip {flip}: rel {side} origin {:?}", origin);
+            assert_eq!(side > 0.0, ahead, "{item:?} back {back}: rel {side} origin {:?}", origin);
         }
     }
 
@@ -1351,5 +1355,33 @@ mod tests {
             g.step(&tr);
         }
         assert!(g.ents.iter().all(|e| matches!(e.kind, EntKind::Blast)), "peel/shell should both be gone: {:?}", g.ents.iter().map(|e| e.kind).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn star_giant_boost_and_pad_all_stack() {
+        let tr = Track::new();
+        let top = |star: bool, giant: bool, boost: bool| {
+            let mut k = Kart::new("a", false);
+            let start = 300;
+            k.pos = tr.pt(start);
+            k.run = start;
+            let t = tr.tangent(start);
+            k.heading = t.y.atan2(t.x);
+            let mut fin = None;
+            let mut best = 0.0f32;
+            for _ in 0..150 {
+                if star { k.star = 5.0; }
+                if giant { k.giant = 5.0; }
+                if boost { k.boost = 5.0; }
+                let inp = autopilot(&k, &tr, 0.0, 14);
+                drive(&mut k, inp, &tr, 3, 0.0, &mut fin, true, 1e9);
+                best = best.max(k.speed());
+            }
+            best
+        };
+        let (plain, star, giant, boost) = (top(false, false, false), top(true, false, false), top(false, true, false), top(false, false, true));
+        let both = top(true, false, true);
+        assert!(star > plain + 10.0 && giant > plain + 10.0, "star {star} giant {giant} plain {plain}");
+        assert!(both > boost + 10.0 && both > star + 10.0, "boost+star {both} vs boost {boost} star {star}");
     }
 }
