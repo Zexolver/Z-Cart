@@ -11,7 +11,6 @@ const FOCAL: f32 = 420.0;
 const HORIZON: f32 = H as f32 * 0.36;
 const EYE_H: f32 = 80.0;
 const BACK: f32 = 170.0;
-const FOG: u32 = 0xBFE3F5;
 
 struct Pr {
     eye: V2,
@@ -43,10 +42,22 @@ impl Pr {
 }
 
 fn sky_and_ground(fb: &mut Fb, tr: &Track, pr: &Pr, time: f32) {
+    let fog_col = tr.theme.fog;
     for y in 0..HORIZON as usize {
         let t = y as f32 / HORIZON;
-        let c = mix(0x3F8FD8, FOG, t);
+        let c = mix(tr.theme.sky, fog_col, t);
         fb.px[y * W..(y + 1) * W].iter_mut().for_each(|p| *p = c);
+    }
+    if tr.theme.scenery == Scenery::Night {
+        for i in 0..90usize {
+            let a = (i as f32 * 2.399) % std::f32::consts::TAU;
+            let da = wrap_angle(a - pr.ang);
+            if da.abs() < 1.1 {
+                let x = W as f32 / 2.0 + da.tan() * FOCAL;
+                let y = (i * 37 % 150) as f32 + 6.0;
+                fb.put(x as i32, y as i32, 0xFFFFFF);
+            }
+        }
     }
     // distant hills, parallax with camera yaw
     for x in 0..W {
@@ -54,7 +65,7 @@ fn sky_and_ground(fb: &mut Fb, tr: &Track, pr: &Pr, time: f32) {
         let h = 26.0 + 16.0 * (a * 2.3 + 0.5).sin() + 9.0 * (a * 6.1).sin();
         let top = (HORIZON - h).max(0.0) as usize;
         for y in top..HORIZON as usize {
-            fb.px[y * W + x] = 0x4F8A73;
+            fb.px[y * W + x] = tr.theme.hills;
         }
     }
     let stripe = (time * 14.0) as i32;
@@ -67,7 +78,7 @@ fn sky_and_ground(fb: &mut Fb, tr: &Track, pr: &Pr, time: f32) {
         for x in 0..W {
             let w = row + pr.r * ((x as f32 + 0.5 - W as f32 / 2.0) * step);
             let c = ground_color(tr, w, stripe);
-            fb.px[y * W + x] = if fog > 0.0 { mix(c, FOG, fog) } else { c };
+            fb.px[y * W + x] = if fog > 0.0 { mix(c, fog_col, fog) } else { c };
         }
     }
 }
@@ -110,14 +121,13 @@ fn cuboid(fb: &mut Fb, pr: &Pr, pos: V2, yaw: f32, sc: f32, bx: [f32; 6], color:
     }
 }
 
-fn draw_kart3d(fb: &mut Fb, pr: &Pr, k: &Kart, idx: usize, time: f32) {
+fn draw_kart3d(fb: &mut Fb, pr: &Pr, k: &Kart, idx: usize, lean: f32, time: f32) {
     if k.invuln > 0.0 && k.spin <= 0.0 && k.star <= 0.0 && k.giant <= 0.0 && k.rocket <= 0.0 && (time * 14.0) as i32 % 2 == 0 {
         return;
     }
     let sc = k.scale();
     let body = KART_COLORS[idx % 8];
-    let drift_tilt = k.drift_dir as f32 * 0.32;
-    let yaw = k.visual_heading() + drift_tilt;
+    let yaw = k.visual_heading() + lean;
     let f = V2::from_angle(yaw);
     let r = f.right();
     let at = |a: f32, b: f32| k.pos + f * (a * sc) + r * (b * sc);
@@ -133,8 +143,10 @@ fn draw_kart3d(fb: &mut Fb, pr: &Pr, k: &Kart, idx: usize, time: f32) {
         ([-6.0, 2.0, -4.0, 4.0, 10.0, 17.0], shade(body, 0.6)),
     ];
     if k.rocket > 0.0 {
-        parts.push(([-14.0, 24.0, -9.0, 9.0, 3.0, 14.0], 0xE53935));
-        parts.push(([24.0, 32.0, -4.0, 4.0, 5.0, 10.0], 0xFFFFFF));
+        parts.push(([-16.0, 26.0, -11.0, 11.0, 0.0, 22.0], 0xE53935));
+        parts.push(([26.0, 36.0, -6.0, 6.0, 4.0, 16.0], 0xFFFFFF));
+        parts.push(([-16.0, -4.0, 11.0, 22.0, 2.0, 12.0], 0xB71C1C));
+        parts.push(([-16.0, -4.0, -22.0, -11.0, 2.0, 12.0], 0xB71C1C));
     }
     parts.sort_by(|a, b| {
         let da = pr.depth(at((a.0[0] + a.0[1]) / 2.0, (a.0[2] + a.0[3]) / 2.0));
@@ -165,6 +177,11 @@ fn draw_kart3d(fb: &mut Fb, pr: &Pr, k: &Kart, idx: usize, time: f32) {
     if let Some((x, y, s)) = pr.p(k.pos, 22.0 * sc) {
         fb.circle(x, y, 6.5 * sc * s, shade(body, 0.6));
         fb.circle(x, y, 4.2 * sc * s, if k.rocket > 0.0 { 0x81D4FA } else { 0xFFE0B2 });
+    }
+    if k.rocket > 0.0 {
+        if let Some((x, y, s)) = pr.p(k.pos, 12.0) {
+            fb.ring(x, y, 34.0 * s, 4.0, if (time * 8.0) as i32 % 2 == 0 { 0xFF1744 } else { 0xFFFFFF });
+        }
     }
     if k.star > 0.0 {
         if let Some((x, y, s)) = pr.p(k.pos, 12.0 * sc) {
@@ -199,14 +216,139 @@ enum Obj {
     Ent(usize),
     Box(usize),
     Coin(usize),
-    Tree(usize),
+    Prop(usize),
 }
 
-fn draw_tree(fb: &mut Fb, pr: &Pr, p: V2) {
-    let Some((x, y, s)) = pr.p(p, 0.0) else { return };
-    fb.rect((x - 5.0 * s) as i32, (y - 26.0 * s) as i32, (10.0 * s).ceil() as i32, (26.0 * s).ceil() as i32, 0x5D4037);
-    fb.poly(&[(x - 34.0 * s, y - 20.0 * s), (x + 34.0 * s, y - 20.0 * s), (x, y - 78.0 * s)], 0x1B5E20);
-    fb.poly(&[(x - 26.0 * s, y - 50.0 * s), (x + 26.0 * s, y - 50.0 * s), (x, y - 108.0 * s)], 0x2E7D32);
+fn glow(fb: &mut Fb, x: f32, y: f32, r: f32, c: u32, a: f32) {
+    for yy in (y - r) as i32..=(y + r) as i32 {
+        for xx in (x - r) as i32..=(x + r) as i32 {
+            let d = ((xx as f32 - x).powi(2) + (yy as f32 - y).powi(2)).sqrt() / r;
+            if d < 1.0 {
+                fb.blend(xx, yy, c, a * (1.0 - d));
+            }
+        }
+    }
+}
+
+fn draw_prop(fb: &mut Fb, pr: &Pr, tr: &Track, p: &Prop, time: f32) {
+    let sc = p.scale;
+    let th = tr.theme;
+    match p.kind {
+        PropKind::Arch => {
+            let f = V2::from_angle(p.yaw);
+            let r = f.right();
+            for side in [-1.0f32, 1.0] {
+                cuboid(fb, pr, p.pos + r * (side * (HALF_W + 8.0)), p.yaw, 1.0, [-5.0, 5.0, -5.0, 5.0, 0.0, 84.0], 0x424242);
+            }
+            cuboid(fb, pr, p.pos, p.yaw, 1.0, [-4.0, 4.0, -(HALF_W + 13.0), HALF_W + 13.0, 70.0, 90.0], 0xD32F2F);
+            cuboid(fb, pr, p.pos + f * 4.5, p.yaw, 1.0, [-1.0, 1.0, -(HALF_W - 4.0), HALF_W - 4.0, 74.0, 86.0], 0xFAFAFA);
+            return;
+        }
+        PropKind::Table => {
+            let parts: [([f32; 6], u32); 6] = [
+                ([-18.0, 18.0, -10.0, 10.0, 18.0, 22.0], 0x9C6B45),
+                ([-18.0, 18.0, -3.0, 3.0, 22.0, 22.5], 0xD32F2F),
+                ([-16.0, 16.0, -20.0, -12.0, 9.0, 12.0], 0x8D6E63),
+                ([-16.0, 16.0, 12.0, 20.0, 9.0, 12.0], 0x8D6E63),
+                ([-15.0, -12.0, -8.0, 8.0, 0.0, 18.0], 0x6D4C41),
+                ([12.0, 15.0, -8.0, 8.0, 0.0, 18.0], 0x6D4C41),
+            ];
+            for (b, c) in parts.iter() {
+                cuboid(fb, pr, p.pos, p.yaw, sc, *b, *c);
+            }
+            return;
+        }
+        _ => {}
+    }
+    let Some((x, y, s0)) = pr.p(p.pos, 0.0) else { return };
+    let s = s0 * sc;
+    match p.kind {
+        PropKind::Pine | PropKind::SnowPine => {
+            let (c1, c2) = match (p.kind, th.scenery) {
+                (PropKind::SnowPine, _) => (0x2F5E52, 0x3E7A69),
+                (_, Scenery::Night) => (0x0F3B1E, 0x175428),
+                _ => (0x1B5E20, 0x2E7D32),
+            };
+            fb.rect((x - 5.0 * s) as i32, (y - 26.0 * s) as i32, (10.0 * s).ceil() as i32, (26.0 * s).ceil() as i32, 0x5D4037);
+            fb.poly(&[(x - 34.0 * s, y - 20.0 * s), (x + 34.0 * s, y - 20.0 * s), (x, y - 78.0 * s)], c1);
+            fb.poly(&[(x - 26.0 * s, y - 50.0 * s), (x + 26.0 * s, y - 50.0 * s), (x, y - 108.0 * s)], c2);
+            if p.kind == PropKind::SnowPine {
+                fb.poly(&[(x - 11.0 * s, y - 92.0 * s), (x + 11.0 * s, y - 92.0 * s), (x, y - 108.0 * s)], 0xFFFFFF);
+                fb.poly(&[(x - 19.0 * s, y - 66.0 * s), (x + 19.0 * s, y - 66.0 * s), (x, y - 78.0 * s)], 0xF4F8FB);
+            }
+        }
+        PropKind::Oak => {
+            fb.rect((x - 5.0 * s) as i32, (y - 40.0 * s) as i32, (10.0 * s).ceil() as i32, (40.0 * s).ceil() as i32, 0x6D4C41);
+            fb.circle(x, y - 62.0 * s, 32.0 * s, 0x2E7D32);
+            fb.circle(x - 16.0 * s, y - 50.0 * s, 22.0 * s, 0x388E3C);
+            fb.circle(x + 15.0 * s, y - 72.0 * s, 20.0 * s, 0x43A047);
+        }
+        PropKind::Bush => {
+            let c = if th.scenery == Scenery::Desert { 0x8D8B4B } else if th.scenery == Scenery::Snow { 0x5D8A7A } else { 0x2E7D32 };
+            fb.circle(x, y - 10.0 * s, 15.0 * s, c);
+            fb.circle(x + 13.0 * s, y - 6.0 * s, 10.0 * s, shade(c, 1.2));
+        }
+        PropKind::Cactus => {
+            let c = 0x2E7D32;
+            fb.rect((x - 6.0 * s) as i32, (y - 62.0 * s) as i32, (12.0 * s).ceil() as i32, (62.0 * s).ceil() as i32, c);
+            fb.rect((x - 20.0 * s) as i32, (y - 44.0 * s) as i32, (16.0 * s).ceil() as i32, (6.0 * s).ceil() as i32, c);
+            fb.rect((x - 20.0 * s) as i32, (y - 58.0 * s) as i32, (6.0 * s).ceil() as i32, (20.0 * s).ceil() as i32, c);
+            fb.rect((x + 4.0 * s) as i32, (y - 34.0 * s) as i32, (16.0 * s).ceil() as i32, (6.0 * s).ceil() as i32, c);
+            fb.rect((x + 14.0 * s) as i32, (y - 48.0 * s) as i32, (6.0 * s).ceil() as i32, (20.0 * s).ceil() as i32, c);
+        }
+        PropKind::Palm => {
+            fb.poly(&[(x - 4.0 * s, y), (x + 4.0 * s, y), (x + 9.0 * s, y - 80.0 * s), (x + 3.0 * s, y - 80.0 * s)], 0x8D6E63);
+            for i in 0..5 {
+                let a = -0.4 + i as f32 * 0.9 - 1.0;
+                let (ex, ey) = (x + 6.0 * s + a.cos() * 40.0 * s, y - 80.0 * s - a.sin().abs() * 14.0 * s + (i as f32 - 2.0).abs() * 6.0 * s);
+                fb.poly(&[(x + 6.0 * s, y - 84.0 * s), (ex, ey), (x + 6.0 * s + a.cos() * 22.0 * s, y - 92.0 * s)], 0x2E9E4A);
+            }
+        }
+        PropKind::Rock => {
+            let base = if th.scenery == Scenery::Snow { 0x9AA7B4 } else if th.scenery == Scenery::Desert { 0xA1887F } else { 0x78909C };
+            fb.poly(&[(x - 20.0 * s, y), (x - 14.0 * s, y - 16.0 * s), (x - 2.0 * s, y - 22.0 * s), (x + 12.0 * s, y - 15.0 * s), (x + 20.0 * s, y)], base);
+            fb.poly(&[(x - 2.0 * s, y - 22.0 * s), (x + 12.0 * s, y - 15.0 * s), (x + 20.0 * s, y), (x + 4.0 * s, y)], shade(base, 0.8));
+        }
+        PropKind::Lamp => {
+            fb.rect((x - 2.0 * s) as i32, (y - 92.0 * s) as i32, (4.0 * s).ceil() as i32, (92.0 * s).ceil() as i32, 0x37474F);
+            if th.scenery == Scenery::Night {
+                glow(fb, x, y - 94.0 * s, 46.0 * s, 0xFFF59D, 0.55);
+            }
+            fb.circle(x, y - 94.0 * s, 5.0 * s, 0xFFF9C4);
+        }
+        PropKind::Tent => {
+            let c = match th.scenery { Scenery::Snow => 0xE3F2FD, Scenery::Desert => 0xD7A86E, _ => 0xFF8F00 };
+            fb.poly(&[(x - 30.0 * s, y), (x, y - 44.0 * s), (x + 30.0 * s, y)], c);
+            fb.poly(&[(x - 8.0 * s, y), (x, y - 26.0 * s), (x + 8.0 * s, y)], shade(c, 0.45));
+            fb.poly(&[(x, y - 44.0 * s), (x + 30.0 * s, y), (x + 14.0 * s, y)], shade(c, 0.8));
+        }
+        PropKind::Flowers => {
+            for (i, col) in [0xF48FB1, 0xFFF176, 0xFFFFFF, 0xCE93D8].iter().enumerate() {
+                let (dx, dy) = ((i as f32 - 1.5) * 7.0, ((i * 5) % 3) as f32 * 3.0);
+                fb.circle(x + dx * s, y - dy * s - 3.0 * s, 3.0 * s, *col);
+                fb.rect((x + dx * s) as i32, (y - dy * s) as i32, 1, (4.0 * s) as i32, 0x2E7D32);
+            }
+        }
+        PropKind::Campfire => {
+            fb.poly(&[(x - 12.0 * s, y), (x + 12.0 * s, y - 4.0 * s), (x + 12.0 * s, y), (x - 12.0 * s, y + 3.0 * s)], 0x5D4037);
+            let fl = 22.0 + 5.0 * (time * 13.0 + p.pos.x).sin();
+            if th.scenery == Scenery::Night {
+                glow(fb, x, y - 14.0 * s, 70.0 * s, 0xFFB74D, 0.45);
+            }
+            fb.poly(&[(x - 9.0 * s, y - 2.0 * s), (x, y - fl * s), (x + 9.0 * s, y - 2.0 * s)], 0xFF6F00);
+            fb.poly(&[(x - 5.0 * s, y - 2.0 * s), (x, y - fl * 0.6 * s), (x + 5.0 * s, y - 2.0 * s)], 0xFFEB3B);
+        }
+        PropKind::Snowman => {
+            fb.circle(x, y - 12.0 * s, 13.0 * s, 0xFFFFFF);
+            fb.circle(x, y - 32.0 * s, 10.0 * s, 0xFFFFFF);
+            fb.circle(x, y - 47.0 * s, 7.0 * s, 0xFFFFFF);
+            fb.rect((x - 6.0 * s) as i32, (y - 58.0 * s) as i32, (12.0 * s).ceil() as i32, (6.0 * s).ceil() as i32, 0x263238);
+            fb.poly(&[(x, y - 47.0 * s), (x + 10.0 * s, y - 45.0 * s), (x, y - 44.0 * s)], 0xFF7043);
+            fb.circle(x - 2.5 * s, y - 49.0 * s, 1.2 * s, 0x111111);
+            fb.circle(x + 2.5 * s, y - 49.0 * s, 1.2 * s, 0x111111);
+        }
+        PropKind::Table | PropKind::Arch => {}
+    }
 }
 
 pub fn draw_game3d(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, cam: &Cam, time: f32) {
@@ -225,9 +367,10 @@ pub fn draw_game3d(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, cam: &Cam
         (lat.abs() <= d * 1.2 + margin).then_some(d)
     };
     let mut objs: Vec<(f32, Obj)> = Vec::new();
-    for (i, p) in tr.trees.iter().enumerate() {
-        if let Some(d) = visible(*p, 80.0) {
-            objs.push((d, Obj::Tree(i)));
+    for (i, p) in tr.props.iter().enumerate() {
+        let margin = if p.kind == PropKind::Arch { 200.0 } else { 80.0 };
+        if let Some(d) = visible(p.pos, margin) {
+            objs.push((d, Obj::Prop(i)));
         }
     }
     for (i, p) in tr.coin_pos.iter().enumerate() {
@@ -254,7 +397,7 @@ pub fn draw_game3d(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, cam: &Cam
 
     for (_, o) in &objs {
         match *o {
-            Obj::Tree(i) => draw_tree(fb, &pr, tr.trees[i]),
+            Obj::Prop(i) => draw_prop(fb, &pr, tr, &tr.props[i], time),
             Obj::Coin(i) => {
                 if let Some((x, y, s)) = pr.p(tr.coin_pos[i], 10.0) {
                     let w = ((time * 4.0 + i as f32).cos()).abs().max(0.25);
@@ -288,7 +431,7 @@ pub fn draw_game3d(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, cam: &Cam
                     }
                 }
             }
-            Obj::Kart(i) => draw_kart3d(fb, &pr, &gs.karts[i], i, time),
+            Obj::Kart(i) => draw_kart3d(fb, &pr, &gs.karts[i], i, cam.vis[i % 8], time),
         }
     }
     for (i, k) in gs.karts.iter().enumerate() {

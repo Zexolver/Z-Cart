@@ -13,7 +13,8 @@ use render::*;
 use render3d::draw_game3d;
 use sim::*;
 use std::time::Instant;
-use track::Track;
+use math::rng_next;
+use track::{track_name, Track};
 
 enum Session {
     None,
@@ -28,7 +29,7 @@ enum Screen {
 }
 
 struct App {
-    tr: Track,
+    tracks: Vec<Track>,
     name: String,
     editing_name: bool,
     msg: String,
@@ -45,6 +46,16 @@ struct App {
     mode3d: bool,
     #[allow(dead_code)]
     dbg_item: usize,
+}
+
+/// Which track the current session is playing (index into `App::tracks`).
+fn track_index(session: &Session, count: usize) -> usize {
+    let t = match session {
+        Session::Host { gs, .. } => gs.track,
+        Session::Client { cl } => cl.state.track,
+        Session::None => 0,
+    };
+    (t as usize).min(count - 1)
 }
 
 fn default_name() -> String {
@@ -70,13 +81,13 @@ fn key_char(k: Key, shift: bool) -> Option<char> {
 impl App {
     fn new() -> App {
         App {
-            tr: Track::new(),
+            tracks: Track::all(),
             name: default_name(),
             editing_name: false,
             msg: String::new(),
             screen: Screen::Title,
             session: Session::None,
-            cam: Cam { pos: math::V2::ZERO, ang: 0.0, zoom: 1.3 },
+            cam: Cam::new(),
             use_seq: 0,
             swap_seq: 0,
             prev_left: false,
@@ -101,11 +112,13 @@ impl App {
         }
         self.prev_left = left;
         self.prev_right = right;
+        let (fwd, back) = (down(Key::W, Key::Up), down(Key::S, Key::Down));
         Input {
             steer: down(Key::D, Key::Right) as i32 as f32 - down(Key::A, Key::Left) as i32 as f32,
-            throttle: down(Key::W, Key::Up),
-            brake: down(Key::S, Key::Down),
+            throttle: fwd,
+            brake: back,
             drift: down(Key::LeftShift, Key::RightShift),
+            aim: if fwd && !back { 1 } else if back && !fwd { -1 } else { 0 },
             use_seq: self.use_seq,
             swap_seq: self.swap_seq,
         }
@@ -114,11 +127,13 @@ impl App {
     /// Test helpers, only compiled into `--features debug-tools` builds.
     #[cfg(feature = "debug-tools")]
     fn debug_keys(&mut self, w: &Window) {
+        let ti = track_index(&self.session, self.tracks.len());
+        let tr = &self.tracks[ti];
         let Session::Host { gs, .. } = &mut self.session else { return };
         let hit = |k: Key| w.is_key_pressed(k, KeyRepeat::No);
         let n = Item::ALL.len();
         if hit(Key::F1) {
-            gs.debug_add_bot(&self.tr);
+            gs.debug_add_bot(tr);
         }
         if hit(Key::F2) {
             gs.debug_remove_bot();
@@ -131,12 +146,12 @@ impl App {
             }
         }
         if hit(Key::F5) && gs.phase == Phase::Racing {
-            let run = gs.laps as i32 * self.tr.n as i32 - 60;
+            let run = gs.laps as i32 * tr.n as i32 - 60;
             if let Some(k) = gs.karts.get_mut(0) {
                 k.run = run;
                 k.prog = run as f32;
-                k.pos = self.tr.pt(run);
-                let t = self.tr.tangent(run);
+                k.pos = tr.pt(run);
+                let t = tr.tangent(run);
                 k.heading = t.y.atan2(t.x);
             }
         }
@@ -146,8 +161,8 @@ impl App {
             }
         }
         if hit(Key::F8) && gs.phase != Phase::Lobby {
-            gs.to_lobby(&self.tr);
-            gs.start_race(&self.tr);
+            gs.to_lobby(tr);
+            gs.start_race(tr);
         }
     }
 
@@ -163,8 +178,9 @@ impl App {
     fn start_hosting(&mut self) {
         match Host::bind(PORT) {
             Ok(host) => {
-                let mut gs = GameState::new(&self.tr);
-                gs.add_human(&self.tr, &self.name);
+                let mut gs = GameState::new(&self.tracks[0]);
+                gs.rng ^= std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+                gs.add_human(&self.tracks[0], &self.name);
                 self.session = Session::Host { host, gs, port: PORT };
                 self.screen = Screen::Play;
                 self.msg.clear();
@@ -253,7 +269,7 @@ impl App {
         }
         if let Some(addr) = join {
             if let Screen::Browse(b, _) = std::mem::replace(&mut self.screen, Screen::Play) {
-                let cl = Client::new(b.sock, addr, &self.name, &self.tr);
+                let cl = Client::new(b.sock, addr, &self.name, &self.tracks[0]);
                 self.session = Session::Client { cl };
                 self.msg.clear();
             }
@@ -274,16 +290,29 @@ impl App {
         let mut leave = esc;
         #[cfg(feature = "debug-tools")]
         self.debug_keys(w);
+        let tracks = &self.tracks;
         match &mut self.session {
             Session::Host { host, gs, .. } => {
-                host.poll(gs, &self.tr);
+                host.poll(gs, &tracks[gs.track as usize]);
                 if let Some(k) = gs.karts.get_mut(0) {
                     k.input = inp;
                 }
                 match gs.phase {
                     Phase::Lobby => {
                         if enter {
-                            gs.start_race(&self.tr);
+                            let pick = if gs.track_sel == 255 { (rng_next(&mut gs.rng) % tracks.len() as u64) as u8 } else { gs.track_sel };
+                            gs.track = pick;
+                            gs.start_race(&tracks[pick as usize]);
+                        }
+                        if w.is_key_pressed(Key::T, KeyRepeat::No) {
+                            gs.track_sel = match gs.track_sel {
+                                255 => 0,
+                                t if t as usize + 1 >= tracks.len() => 255,
+                                t => t + 1,
+                            };
+                            if gs.track_sel != 255 {
+                                gs.track = gs.track_sel;
+                            }
                         }
                         if w.is_key_pressed(Key::B, KeyRepeat::No) {
                             gs.bots = (gs.bots + 1) % 8;
@@ -292,13 +321,13 @@ impl App {
                             gs.laps = gs.laps % 9 + 1;
                         }
                     }
-                    Phase::Results if enter => gs.to_lobby(&self.tr),
+                    Phase::Results if enter => gs.to_lobby(&tracks[gs.track as usize]),
                     _ => {}
                 }
                 self.tick_acc += dt.min(0.1);
                 while self.tick_acc >= DT {
                     self.tick_acc -= DT;
-                    gs.step(&self.tr);
+                    gs.step(&tracks[gs.track as usize]);
                     self.lobby_tick += 1;
                     if gs.phase != Phase::Lobby || self.lobby_tick % 6 == 0 {
                         host.broadcast(gs);
@@ -326,6 +355,7 @@ impl App {
         }
         // camera follows our own kart
         if let Some((gs, me)) = self.view() {
+            self.cam.update_vis(&gs, dt);
             if let Some(k) = gs.karts.get(me) {
                 if matches!(gs.phase, Phase::Lobby) {
                     self.cam.pos = k.pos;
@@ -372,15 +402,20 @@ impl App {
                     Session::Host { port, .. } => Some(*port),
                     _ => None,
                 };
+                let ti = track_index(&self.session, self.tracks.len());
+                let tr = &self.tracks[ti];
                 match self.view() {
                     None => draw_connecting(fb, time),
                     Some((gs, me)) => match gs.phase {
-                        Phase::Lobby => draw_lobby(fb, &gs, me, is_host, port, time),
+                        Phase::Lobby => {
+                            let label = if gs.track_sel == 255 { "Random".to_string() } else { track_name(gs.track_sel as usize).to_string() };
+                            draw_lobby(fb, &gs, me, is_host, port, &label, time)
+                        }
                         _ => {
                             if self.mode3d {
-                                draw_game3d(fb, &self.tr, &gs, me, &self.cam, time);
+                                draw_game3d(fb, tr, &gs, me, &self.cam, time);
                             } else {
-                                draw_game(fb, &self.tr, &gs, me, &self.cam, time);
+                                draw_game(fb, tr, &gs, me, &self.cam, time);
                             }
                             if gs.phase == Phase::Results {
                                 draw_results(fb, &gs, me, is_host);
@@ -394,8 +429,8 @@ impl App {
 }
 
 /// `z-cart --shot out.ppm`: render one frame of a bot race, for debugging.
-fn screenshot(path: &str, three_d: bool) {
-    let tr = Track::new();
+fn screenshot(path: &str, three_d: bool, track: usize, extra: &str) {
+    let tr = Track::build(track);
     let mut gs = GameState::new(&tr);
     gs.bots = 7;
     gs.add_human(&tr, "You");
@@ -407,8 +442,10 @@ fn screenshot(path: &str, three_d: bool) {
     gs.karts[0].is_bot = false;
     gs.karts[0].slots = [(Item::Seeker as u8, 1), (Item::TripleTurbo as u8, 3)];
     gs.karts[0].coins = 6;
-    gs.ents.push(Ent { kind: EntKind::Peel, pos: gs.karts[0].pos + math::V2::from_angle(gs.karts[0].heading) * 200.0, vel: math::V2::ZERO, owner: 9, age: 1.0, timer: 0.0, target: 0, run: 0, bounces: 0 });
-    let mut cam = Cam { pos: gs.karts[0].pos, ang: gs.karts[0].heading, zoom: 1.3 };
+    gs.ents.push(Ent { kind: EntKind::Peel, pos: gs.karts[0].pos + math::V2::from_angle(gs.karts[0].heading) * 200.0, vel: math::V2::ZERO, owner: 9, age: 1.0, timer: 0.0, target: 0, run: 0, bounces: 0, rev: false });
+    let mut cam = Cam::new();
+    cam.pos = gs.karts[0].pos;
+    cam.ang = gs.karts[0].heading;
     let mut fb = Fb::new();
     if three_d {
         cam.follow3(&gs.karts[0], 1.0);
@@ -416,6 +453,19 @@ fn screenshot(path: &str, three_d: bool) {
     } else {
         cam.follow(&gs.karts[0], 1.0);
         draw_game(&mut fb, &tr, &gs, 0, &cam, 3.3);
+    }
+    match extra {
+        "results" => {
+            gs.phase = Phase::Results;
+            for k in gs.karts.iter_mut() {
+                k.finished = true;
+                k.finish_time = 95.0 + k.place as f32 * 3.3;
+            }
+            draw_results(&mut fb, &gs, 0, true);
+        }
+        "title" => draw_title(&mut fb, "Zexolver", false, true, "", 1.0),
+        "lobby" => draw_lobby(&mut fb, &gs, 0, true, Some(PORT), "Random", 1.0),
+        _ => {}
     }
     let mut out = format!("P6\n{W} {H}\n255\n").into_bytes();
     for p in &fb.px {
@@ -427,7 +477,7 @@ fn screenshot(path: &str, three_d: bool) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "--shot" {
-        return screenshot(&args[2], args.get(3).map_or(false, |a| a == "3d"));
+        return screenshot(&args[2], args.get(3).map_or(false, |a| a == "3d"), args.get(4).and_then(|a| a.parse().ok()).unwrap_or(0), args.get(5).map_or("", |a| a.as_str()));
     }
     let mut window = Window::new(
         "Z-Cart",

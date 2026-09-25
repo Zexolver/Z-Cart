@@ -119,6 +119,8 @@ fn encode_snapshot(gs: &GameState, seq: u32, your_id: usize) -> Vec<u8> {
     w.f32(gs.timer);
     w.u8(gs.laps);
     w.u8(gs.bots);
+    w.u8(gs.track);
+    w.u8(gs.track_sel);
     w.u8(gs.karts.len() as u8);
     for k in &gs.karts {
         w.str(&k.name);
@@ -175,6 +177,8 @@ fn decode_snapshot(mut r: R, gs: &mut GameState) -> Option<(u32, usize)> {
     let timer = r.f32()?;
     let laps = r.u8()?;
     let bots = r.u8()?;
+    let track = r.u8()?;
+    let track_sel = r.u8()?;
     let nk = r.u8()? as usize;
     if nk > MAX_KARTS {
         return None;
@@ -226,7 +230,7 @@ fn decode_snapshot(mut r: R, gs: &mut GameState) -> Option<(u32, usize)> {
             EntKind::Bomb => timer = b as f32 / 50.0,
             _ => {}
         }
-        let mut e = Ent { kind, pos, vel, owner: 255, age, timer, target: 255, run: 0, bounces: 0 };
+        let mut e = Ent { kind, pos, vel, owner: 255, age, timer, target: 255, run: 0, bounces: 0, rev: false };
         e.age = age;
         ents.push(e);
     }
@@ -237,6 +241,8 @@ fn decode_snapshot(mut r: R, gs: &mut GameState) -> Option<(u32, usize)> {
     gs.timer = timer;
     gs.laps = laps;
     gs.bots = bots;
+    gs.track = track;
+    gs.track_sel = track_sel;
     gs.karts = karts;
     gs.ents = ents;
     gs.boxes = boxes;
@@ -433,6 +439,7 @@ impl Host {
                             throttle: flags & 1 != 0,
                             brake: flags & 2 != 0,
                             drift: flags & 4 != 0,
+                            aim: if flags & 8 != 0 { 1 } else if flags & 16 != 0 { -1 } else { 0 },
                             use_seq,
                             swap_seq,
                         };
@@ -588,7 +595,7 @@ impl Client {
         let mut w = W::new(T_INPUT);
         w.u16(self.out_seq);
         w.u8((inp.steer.clamp(-1.0, 1.0) * 127.0) as i8 as u8);
-        w.u8(inp.throttle as u8 | (inp.brake as u8) << 1 | (inp.drift as u8) << 2);
+        w.u8(inp.throttle as u8 | (inp.brake as u8) << 1 | (inp.drift as u8) << 2 | ((inp.aim > 0) as u8) << 3 | ((inp.aim < 0) as u8) << 4);
         w.u8(inp.use_seq);
         w.u8(inp.swap_seq);
         let _ = self.sock.send_to(&w.0, self.host);
@@ -668,7 +675,7 @@ mod tests {
         }
         gs.start_race(&tr);
         for i in 0..MAX_ENTS {
-            gs.ents.push(Ent { kind: EntKind::Peel, pos: V2::ZERO, vel: V2::ZERO, owner: 0, age: 0.0, timer: 0.0, target: 0, run: 0, bounces: 0 });
+            gs.ents.push(Ent { kind: EntKind::Peel, pos: V2::ZERO, vel: V2::ZERO, owner: 0, age: 0.0, timer: 0.0, target: 0, run: 0, bounces: 0, rev: false });
             let _ = i;
         }
         let len = encode_snapshot(&gs, 1, 0).len();

@@ -63,6 +63,12 @@ view is scaled to fit while keeping its aspect ratio.
 ## Packaging
 `scripts/package.sh` builds `dist/z-cart_<ver>_arm64.deb` and `dist/z-cart-amd64.exe` (cross-compiled with `zig cc` as linker).
 
+## Tracks
+Meadow Circuit, Dune Drift, Frost Ridge and Neon Nights, each with its own scenery and picnic-style clearings. The host picks a track (or **Random**) with **T** in the lobby.
+
+## Aiming items
+Left click uses the primary item. Peels, Decoys, Bouncers, Seekers and Bombs go their default way (Peel/Decoy dropped behind, the rest thrown forward); hold **W** while clicking to lob a Peel/Decoy forward, or **S** to throw Bouncers, Seekers and Bombs backward.
+
 ## Gameplay notes
 * Spin-outs are cosmetic: the kart whirls in place and always ends up facing the way it was going.
 * A flashing WRONG WAY warning appears when you're driving against the track direction.

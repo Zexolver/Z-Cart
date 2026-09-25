@@ -57,6 +57,23 @@ impl Fb {
         }
     }
 
+    /// Rounded rectangle, optionally translucent.
+    pub fn rrect(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, c: u32, alpha: f32) {
+        let r = r.min(w / 2).min(h / 2).max(0);
+        for yy in y.max(0)..(y + h).min(H as i32) {
+            for xx in x.max(0)..(x + w).min(W as i32) {
+                let (lx, ly) = (xx - x, yy - y);
+                let cx = if lx < r { r - lx } else if lx >= w - r { lx - (w - r - 1) } else { 0 };
+                let cy = if ly < r { r - ly } else if ly >= h - r { ly - (h - r - 1) } else { 0 };
+                if cx * cx + cy * cy > r * r + r {
+                    continue;
+                }
+                let d = &mut self.px[yy as usize * W + xx as usize];
+                *d = if alpha >= 1.0 { c } else { mix(*d, c, alpha) };
+            }
+        }
+    }
+
     pub fn circle(&mut self, cx: f32, cy: f32, r: f32, c: u32) {
         let r2 = r * r;
         for y in ((cy - r).floor() as i32).max(0)..=((cy + r).ceil() as i32).min(H as i32 - 1) {
@@ -179,9 +196,23 @@ pub struct Cam {
     pub pos: V2,
     pub ang: f32,
     pub zoom: f32,
+    /// Smoothed cosmetic drift lean per kart (3D view).
+    pub vis: [f32; 8],
 }
 
 impl Cam {
+    pub fn new() -> Cam {
+        Cam { pos: V2::ZERO, ang: 0.0, zoom: 1.3, vis: [0.0; 8] }
+    }
+
+    pub fn update_vis(&mut self, gs: &GameState, dt: f32) {
+        let a = 1.0 - (-10.0 * dt).exp();
+        for (i, k) in gs.karts.iter().enumerate().take(8) {
+            let target = if k.spin > 0.0 { 0.0 } else { k.drift_dir as f32 * 0.35 };
+            self.vis[i] += (target - self.vis[i]) * a;
+        }
+    }
+
     pub fn project(&self, p: V2) -> (f32, f32) {
         let d = p - self.pos;
         let f = V2::from_angle(self.ang);
@@ -209,26 +240,27 @@ impl Cam {
 
 pub fn ground_color(tr: &Track, w: V2, stripe: i32) -> u32 {
     let d = tr.dist_at(w);
+    let th = tr.theme;
     if d < HALF_W - KERB_W {
-        let i = tr.near_idx(w) as i32;
-        let on_pad = d < 30.0 && tr.pad_ranges.iter().any(|&(a, b)| (i as usize) >= a && (i as usize) < b);
-        if on_pad {
-            if ((i + stripe) / 2) % 2 == 0 { 0xFFC107 } else { 0xFF6F00 }
-        } else if i < 4 || i as usize >= tr.n - 1 {
-            if ((w.x / 10.0).floor() as i32 + (w.y / 10.0).floor() as i32) & 1 == 0 { 0xF5F5F5 } else { 0x212121 }
-        } else if d < 2.5 && (i / 5) % 2 == 0 {
-            0xC8C8C8
-        } else {
-            0x5A5D66
+        if let Some((a, _)) = tr.pad_at(w) {
+            return if ((a / 9.0).floor() as i32 + stripe / 2) & 1 == 0 { 0xFFC107 } else { 0xFF6F00 };
         }
+        if let Some((a, b)) = tr.finish_at(w) {
+            return if ((a / 6.0).floor() as i32 + (b / 6.0).floor() as i32) & 1 == 0 { 0xF5F5F5 } else { 0x212121 };
+        }
+        let i = tr.near_idx(w) as i32;
+        if d < 2.5 && (i / 5) % 2 == 0 { 0xC8C8C8 } else { th.road }
     } else if d < HALF_W {
         let i = tr.near_idx(w);
-        if (i / 3) % 2 == 0 { 0xD32F2F } else { 0xF5F5F5 }
+        th.kerb[(i / 3) % 2]
     } else if d < HALF_W + GRASS_W {
-        if ((w.x / 48.0).floor() as i32 + (w.y / 48.0).floor() as i32) & 1 == 0 { 0x3C8C3C } else { 0x37823A }
+        th.grass[(((w.x / 48.0).floor() as i32 + (w.y / 48.0).floor() as i32) & 1) as usize]
+    } else if tr.in_clearing(w) {
+        let dd = ((w.x / 32.0).floor() as i32 + (w.y / 32.0).floor() as i32) & 1;
+        if dd == 0 { th.clearing } else { shade(th.clearing, 0.95) }
     } else {
         let h = ((w.x / 20.0).floor() as i32).wrapping_mul(73856093) ^ ((w.y / 20.0).floor() as i32).wrapping_mul(19349663);
-        if h & 3 == 0 { 0x1B5E20 } else { 0x143D18 }
+        th.wall[(h & 3 != 0) as usize]
     }
 }
 
@@ -418,6 +450,9 @@ fn draw_kart(fb: &mut Fb, cam: &Cam, k: &Kart, idx: usize, time: f32, label: boo
     if k.star > 0.0 {
         fb.ring(cx, cy, 22.0 * sc * z, 4.0, hue(time * 3.0 + idx as f32 * 0.1));
     }
+    if k.rocket > 0.0 {
+        fb.ring(cx, cy, 26.0 * z, 4.0, if (time * 8.0) as i32 % 2 == 0 { 0xFF1744 } else { 0xFFFFFF });
+    }
     if k.boost > 0.0 || k.rocket > 0.0 {
         let fl = 8.0 + 6.0 * ((time * 40.0).sin() * 0.5 + 0.5);
         fb.poly(&[to(-16.0, -5.0), to(-16.0 - fl, 0.0), to(-16.0, 5.0)], 0xFF9800);
@@ -521,13 +556,14 @@ pub fn draw_hud(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, k: &Kart, ti
     }
 
     // place + lap + time
-    fb.text_shadow(16, 12, &place_str(k.place), 5, 0xFFEB3B);
-    fb.text_shadow(16, 60, &format!("/{}", gs.karts.len()), 2, 0xFFFFFF);
+    let ps = place_str(k.place);
+    fb.text_shadow(16, 12, &ps, 5, 0xFFEB3B);
+    fb.text_shadow(16 + ps.chars().count() as i32 * 40 + 10, 30, &format!("/ {}", gs.karts.len()), 3, 0xFFFFFF);
     let lap = ((k.prog / tr.n as f32).floor() as i32 + 1).clamp(1, gs.laps as i32);
-    fb.text_shadow(16, 84, &format!("LAP {}/{}", lap, gs.laps), 3, 0xFFFFFF);
+    fb.text_shadow(16, 68, &format!("LAP {}/{}", lap, gs.laps), 3, 0xFFFFFF);
     let t = if gs.phase == Phase::Racing || gs.phase == Phase::Results { gs.timer } else { 0.0 };
     let t = if gs.phase == Phase::Results { k.finish_time } else { t };
-    fb.text_shadow(16, 116, &format!("{:02}:{:04.1}", (t / 60.0) as i32, t % 60.0), 2, 0xFFFFFF);
+    fb.text_shadow(16, 100, &format!("{:02}:{:04.1}", (t / 60.0) as i32, t % 60.0), 2, 0xFFFFFF);
 
     // coins + speed
     fb.circle(28.0, H as f32 - 60.0, 9.0, 0xFF8F00);
@@ -547,16 +583,16 @@ pub fn draw_hud(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize, k: &Kart, ti
     if k.shrunk > 0.0 { fx.push(("SHRUNK", k.shrunk, 0x90CAF9)); }
     if k.inked > 0.0 { fx.push(("INKED", k.inked, 0xBDBDBD)); }
     for (i, (n, t, c)) in fx.iter().enumerate() {
-        fb.text_shadow(16, 150 + i as i32 * 16, &format!("{n} {:.0}s", t.ceil()), 2, *c);
+        fb.text_shadow(16, 134 + i as i32 * 16, &format!("{n} {:.0}s", t.ceil()), 2, *c);
     }
 
     // item slots
     let bx = W as i32 / 2 - 50;
-    fb.rect_alpha(bx - 8, 8, 116, 78, 0x000000, 0.45);
+    fb.rrect(bx - 8, 8, 116, 78, 16, 0x000000, 0.45);
     slot(fb, k.slots[0], bx as f32 + 30.0, 36.0, 24.0, time);
-    fb.rect_alpha(bx + 66, 30, 36, 36, 0x000000, 0.4);
+    fb.rrect(bx + 66, 30, 36, 36, 10, 0x000000, 0.4);
     slot(fb, k.slots[1], bx as f32 + 84.0, 48.0, 13.0, time);
-    fb.text_center(W as i32 / 2, 92, "L-click use   R-click swap", 1, 0xDDDDDD);
+    fb.text_center(W as i32 / 2, 92, "L-click use (hold W/S: throw fwd/back)   R-click swap", 1, 0xDDDDDD);
 
     minimap(fb, tr, gs, me);
 
@@ -597,7 +633,7 @@ fn slot(fb: &mut Fb, s: (u8, u8), x: f32, y: f32, r: f32, time: f32) {
 fn minimap(fb: &mut Fb, tr: &Track, gs: &GameState, me: usize) {
     let (mw, mh) = (150.0, 116.0);
     let (ox, oy) = (W as f32 - mw - 14.0, 14.0);
-    fb.rect_alpha(ox as i32 - 6, oy as i32 - 6, mw as i32 + 12, mh as i32 + 12, 0x000000, 0.45);
+    fb.rrect(ox as i32 - 6, oy as i32 - 6, mw as i32 + 12, mh as i32 + 12, 14, 0x000000, 0.45);
     let sx = mw / (tr.max.x - tr.min.x);
     let sy = mh / (tr.max.y - tr.min.y);
     let s = sx.min(sy);
@@ -628,7 +664,7 @@ fn backdrop(fb: &mut Fb, time: f32) {
 
 pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, mode3d: bool, msg: &str, time: f32) {
     backdrop(fb, time);
-    fb.text_center(W as i32 / 2, 50, "Z-CART", 12, 0xFFEB3B);
+    fb.text_center(W as i32 / 2, 50, "Z-CART", 10, 0xFFEB3B);
     fb.text_center(W as i32 / 2, 150, "LAN kart racing - peer hosted, IPv6 link-local", 1, 0x9FB3C8);
     let cursor = if editing && (time * 2.0) as i32 % 2 == 0 { "_" } else { "" };
     let lines = [
@@ -639,16 +675,16 @@ pub fn draw_title(fb: &mut Fb, name: &str, editing: bool, mode3d: bool, msg: &st
         ("Q", "Quit"),
     ];
     for (i, (k, v)) in lines.iter().enumerate() {
-        let y = 200 + i as i32 * 34;
-        fb.text_shadow(300, y, &format!("[{k}]"), 3, 0x66BB6A);
-        fb.text_shadow(390, y, v, 3, 0xFFFFFF);
+        let y = 205 + i as i32 * 32;
+        fb.text_shadow(300, y, &format!("[{k}]"), 2, 0x66BB6A);
+        fb.text_shadow(370, y, v, 2, 0xFFFFFF);
     }
-    fb.text_shadow(300, 368, &format!("Name: {name}{cursor}"), 2, if editing { 0xFFEB3B } else { 0xCFD8DC });
-    fb.text_center(W as i32 / 2, 392, "DRIVE: WASD / arrows   DRIFT: hold Shift   C: switch view", 2, 0xCFD8DC);
-    fb.text_center(W as i32 / 2, 416, "USE ITEM: left click   SWAP ITEM SLOT: right click", 2, 0xCFD8DC);
-    fb.text_center(W as i32 / 2, 456, "Items: Peel Bouncer Seeker Nova Turbo Giant Star Bomb Decoy Zap Rocket Ink Nitro", 1, 0x9FB3C8);
+    fb.text_shadow(300, 364, &format!("Name: {name}{cursor}"), 2, if editing { 0xFFEB3B } else { 0xCFD8DC });
+    fb.text_center(W as i32 / 2, 404, "DRIVE: WASD / arrows   DRIFT: hold Shift   C: switch view", 1, 0xCFD8DC);
+    fb.text_center(W as i32 / 2, 428, "USE ITEM: left click (hold W/S to throw forward/back)   SWAP SLOT: right click", 1, 0xCFD8DC);
+    fb.text_center(W as i32 / 2, 466, "Items: Peel Bouncer Seeker Nova Turbo Giant Star Bomb Decoy Zap Rocket Ink Nitro", 1, 0x9FB3C8);
     if !msg.is_empty() {
-        fb.text_center(W as i32 / 2, 490, msg, 2, 0xFF8A80);
+        fb.text_center(W as i32 / 2, 496, msg, 2, 0xFF8A80);
     }
 }
 
@@ -682,32 +718,34 @@ pub fn draw_browse(fb: &mut Fb, hosts: &[crate::net::HostInfo], sel: usize, msg:
     }
 }
 
-pub fn draw_lobby(fb: &mut Fb, gs: &GameState, me: usize, is_host: bool, port: Option<u16>, time: f32) {
+pub fn draw_lobby(fb: &mut Fb, gs: &GameState, me: usize, is_host: bool, port: Option<u16>, track_label: &str, time: f32) {
     backdrop(fb, time);
     fb.text_center(W as i32 / 2, 30, "LOBBY", 6, 0xFFEB3B);
     if let Some(p) = port {
         fb.text_center(W as i32 / 2, 90, &format!("Hosting on UDP port {p} - friends on your LAN will see this game under Join"), 1, 0x9FB3C8);
     }
     for (i, k) in gs.karts.iter().enumerate() {
-        let y = 130 + i as i32 * 36;
+        let y = 122 + i as i32 * 32;
         fb.rect(260, y, 24, 24, KART_COLORS[i % 8]);
         let tag = if i == 0 { " (host)" } else { "" };
         let you = if i == me { "  <- you" } else { "" };
         fb.text_shadow(300, y + 2, &format!("{}{tag}{you}", k.name), 2, 0xFFFFFF);
     }
     let bots = (gs.bots as usize).min(MAX_KARTS - gs.karts.len());
-    fb.text_shadow(260, 130 + gs.karts.len() as i32 * 36 + 10, &format!("+ {bots} bot(s)"), 2, 0x90A4AE);
+    fb.text_shadow(680, 126, &format!("+ {bots} bot(s)"), 2, 0x90A4AE);
     if is_host {
-        fb.text_center(W as i32 / 2, H as i32 - 110, &format!("Bots: {}  [B]     Laps: {}  [L]", gs.bots, gs.laps), 2, 0xFFFFFF);
-        fb.text_center(W as i32 / 2, H as i32 - 76, "ENTER: start race     ESC: close lobby", 2, 0x66BB6A);
+        fb.text_center(W as i32 / 2, H as i32 - 134, &format!("Track: {track_label}  [T]"), 2, 0xFFEB3B);
+        fb.text_center(W as i32 / 2, H as i32 - 106, &format!("Bots: {}  [B]     Laps: {}  [L]", gs.bots, gs.laps), 2, 0xFFFFFF);
+        fb.text_center(W as i32 / 2, H as i32 - 72, "ENTER: start race     ESC: close lobby", 2, 0x66BB6A);
     } else {
-        fb.text_center(W as i32 / 2, H as i32 - 110, &format!("Bots: {}   Laps: {}", gs.bots, gs.laps), 2, 0xFFFFFF);
-        fb.text_center(W as i32 / 2, H as i32 - 76, "Waiting for the host to start...   ESC: leave", 2, 0x66BB6A);
+        fb.text_center(W as i32 / 2, H as i32 - 134, &format!("Track: {track_label}"), 2, 0xFFEB3B);
+        fb.text_center(W as i32 / 2, H as i32 - 106, &format!("Bots: {}   Laps: {}", gs.bots, gs.laps), 2, 0xFFFFFF);
+        fb.text_center(W as i32 / 2, H as i32 - 72, "Waiting for the host to start...   ESC: leave", 2, 0x66BB6A);
     }
 }
 
 pub fn draw_results(fb: &mut Fb, gs: &GameState, me: usize, is_host: bool) {
-    fb.rect_alpha(200, 50, 560, 440, 0x000000, 0.75);
+    fb.rrect(200, 50, 560, 440, 22, 0x000000, 0.78);
     fb.text_center(W as i32 / 2, 66, "RESULTS", 5, 0xFFEB3B);
     let mut order: Vec<usize> = (0..gs.karts.len()).collect();
     order.sort_by_key(|&i| gs.karts[i].place);
@@ -715,11 +753,14 @@ pub fn draw_results(fb: &mut Fb, gs: &GameState, me: usize, is_host: bool) {
         let k = &gs.karts[i];
         let y = 130 + row as i32 * 38;
         let c = if i == me { 0xFFEB3B } else { 0xFFFFFF };
-        fb.text_shadow(230, y, &place_str(row as u8), 2, c);
-        fb.rect(320, y - 2, 20, 20, KART_COLORS[i % 8]);
-        fb.text_shadow(352, y, &k.name, 2, c);
+        fb.text_shadow(220, y, &place_str(row as u8), 2, c);
+        fb.rect(290, y - 2, 20, 20, KART_COLORS[i % 8]);
+        fb.text_shadow(320, y, &k.name, 2, c);
+        fb.circle(600.0, y as f32 + 8.0, 7.0, 0xFF8F00);
+        fb.circle(600.0, y as f32 + 8.0, 5.0, 0xFFD600);
+        fb.text_shadow(614, y, &format!("{}", k.coins), 2, c);
         let t = if k.finished { format!("{:02}:{:05.2}", (k.finish_time / 60.0) as i32, k.finish_time % 60.0) } else { "DNF".into() };
-        fb.text_shadow(600, y, &t, 2, c);
+        fb.text_shadow(680, y, &t, 2, c);
     }
     let hint = if is_host { "ENTER: back to lobby    ESC: quit" } else { "Waiting for host...    ESC: leave" };
     fb.text_center(W as i32 / 2, 450, hint, 2, 0x66BB6A);

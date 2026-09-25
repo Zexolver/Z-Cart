@@ -147,11 +147,13 @@ pub struct Ent {
     pub target: u8,
     pub run: i32,
     pub bounces: u8,
+    /// Seekers fired backwards follow the track in reverse.
+    pub rev: bool,
 }
 
 impl Ent {
     fn new(kind: EntKind, pos: V2, vel: V2, owner: usize) -> Ent {
-        Ent { kind, pos, vel, owner: owner as u8, age: 0.0, timer: 0.0, target: 255, run: 0, bounces: 0 }
+        Ent { kind, pos, vel, owner: owner as u8, age: 0.0, timer: 0.0, target: 255, run: 0, bounces: 0, rev: false }
     }
 }
 
@@ -161,6 +163,8 @@ pub struct Input {
     pub throttle: bool,
     pub brake: bool,
     pub drift: bool,
+    /// Throw direction held while clicking: +1 forward (W), -1 backward (S).
+    pub aim: i8,
     /// Click counters: wrapping, so a lost packet never loses a click.
     pub use_seq: u8,
     pub swap_seq: u8,
@@ -186,6 +190,7 @@ pub struct Kart {
     /// Brief extra speed for boosting onto a boost pad.
     pub combo: f32,
     pub on_pad: bool,
+    pub drift_t: f32,
     /// (item id, uses left); id 0 = empty. Slot 0 is the primary.
     pub slots: [(u8, u8); 2],
     pub coins: u8,
@@ -221,6 +226,7 @@ impl Kart {
             invuln: 0.0,
             combo: 0.0,
             on_pad: false,
+            drift_t: 0.0,
             slots: [(0, 0); 2],
             coins: 0,
             run: 0,
@@ -300,6 +306,9 @@ pub struct GameState {
     pub timer: f32,
     pub laps: u8,
     pub bots: u8,
+    /// Track chosen in the lobby (255 = random) and the one actually in play.
+    pub track_sel: u8,
+    pub track: u8,
     pub karts: Vec<Kart>,
     pub ents: Vec<Ent>,
     pub boxes: u32,
@@ -317,6 +326,8 @@ impl GameState {
             timer: 0.0,
             laps: 3,
             bots: 3,
+            track_sel: 0,
+            track: 0,
             karts: Vec::new(),
             ents: Vec::new(),
             boxes: (1u64 << tr.box_pos.len()) as u32 - 1,
@@ -376,6 +387,7 @@ impl GameState {
     }
 
     pub fn start_race(&mut self, tr: &Track) {
+        let _ = tr.name;
         let free = MAX_KARTS - self.karts.len();
         let nb = (self.bots as usize).min(free);
         for b in 0..nb {
@@ -466,6 +478,29 @@ impl GameState {
     }
 
     pub fn step(&mut self, tr: &Track) {
+        self.step_once(tr);
+        if self.phase != Phase::Racing {
+            return;
+        }
+        let humans_done = self.humans() > 0 && self.karts.iter().filter(|k| !k.is_bot).all(|k| k.finished);
+        if humans_done {
+            // everyone human is home: let the bots finish so nobody is stuck with a DNF
+            for _ in 0..60 * 180 {
+                if self.karts.iter().all(|k| k.finished) {
+                    break;
+                }
+                self.step_once(tr);
+            }
+        }
+        let all_done = self.karts.iter().all(|k| k.finished);
+        let timeout = self.first_finish.map_or(false, |t| self.timer - t > 120.0);
+        if all_done || timeout || humans_done {
+            self.phase = Phase::Results;
+            self.timer = 0.0;
+        }
+    }
+
+    fn step_once(&mut self, tr: &Track) {
         match self.phase {
             Phase::Lobby => return,
             Phase::Countdown => {
@@ -597,15 +632,6 @@ impl GameState {
         for (p, &i) in order.iter().enumerate() {
             self.karts[i].place = p as u8;
         }
-        if racing {
-            let humans_done = self.karts.iter().filter(|k| !k.is_bot).all(|k| k.finished);
-            let all_done = self.karts.iter().all(|k| k.finished);
-            let timeout = self.first_finish.map_or(false, |t| self.timer - t > 30.0);
-            if all_done || timeout || (humans_done && self.humans() > 0) {
-                self.phase = Phase::Results;
-                self.timer = 0.0;
-            }
-        }
     }
 
     fn kart_collisions(&mut self) {
@@ -657,6 +683,18 @@ impl GameState {
         best.1
     }
 
+    fn nearest_behind(&self, of: usize) -> u8 {
+        let me = self.karts[of].prog;
+        let mut best = (f32::MAX, 255u8);
+        for (j, k) in self.karts.iter().enumerate() {
+            let d = me - k.prog;
+            if j != of && d > 0.0 && d < best.0 {
+                best = (d, j as u8);
+            }
+        }
+        best.1
+    }
+
     fn leader_excluding(&self, owner: usize) -> u8 {
         let mut best = (f32::MIN, 255u8);
         for (j, k) in self.karts.iter().enumerate() {
@@ -679,25 +717,32 @@ impl GameState {
         let k = &self.karts[i];
         let fwd = V2::from_angle(k.heading);
         let (pos, sc, run, vel) = (k.pos, k.scale(), k.run, k.vel);
-        let behind = pos - fwd * (26.0 * sc);
+        let aim = k.input.aim;
+        let behind = pos - fwd * (30.0 * sc);
         let ahead = pos + fwd * (30.0 * sc);
         match item {
-            Item::Peel | Item::TriplePeel => {
-                let mut e = Ent::new(EntKind::Peel, behind, V2::ZERO, i);
-                e.timer = 0.6;
-                self.spawn(e);
-            }
-            Item::Decoy => {
-                let mut e = Ent::new(EntKind::Decoy, behind, V2::ZERO, i);
+            Item::Peel | Item::TriplePeel | Item::Decoy => {
+                // dropped behind by default, lobbed ahead when holding forward
+                let kind = if item == Item::Decoy { EntKind::Decoy } else { EntKind::Peel };
+                let mut e = if aim > 0 {
+                    Ent::new(kind, ahead, fwd * 520.0 + vel * 0.5, i)
+                } else {
+                    Ent::new(kind, behind, V2::ZERO, i)
+                };
                 e.timer = 0.6;
                 self.spawn(e);
             }
             Item::Bouncer | Item::TripleBouncer => {
-                self.spawn(Ent::new(EntKind::Bouncer, ahead, fwd * 640.0, i));
+                let dir = if aim < 0 { -fwd } else { fwd };
+                let from = if aim < 0 { behind } else { ahead };
+                self.spawn(Ent::new(EntKind::Bouncer, from, dir * 640.0, i));
             }
             Item::Seeker => {
-                let mut e = Ent::new(EntKind::Seeker, ahead, fwd * 540.0, i);
-                e.target = self.nearest_ahead(i);
+                let back = aim < 0;
+                let dir = if back { -fwd } else { fwd };
+                let mut e = Ent::new(EntKind::Seeker, if back { behind } else { ahead }, dir * 540.0, i);
+                e.target = if back { self.nearest_behind(i) } else { self.nearest_ahead(i) };
+                e.rev = back;
                 e.run = run;
                 self.spawn(e);
             }
@@ -708,7 +753,11 @@ impl GameState {
                 self.spawn(e);
             }
             Item::Bomb => {
-                let mut e = Ent::new(EntKind::Bomb, ahead, fwd * 380.0 + vel * 0.5, i);
+                let mut e = if aim < 0 {
+                    Ent::new(EntKind::Bomb, behind, -fwd * 300.0 + vel * 0.5, i)
+                } else {
+                    Ent::new(EntKind::Bomb, ahead, fwd * 380.0 + vel * 0.5, i)
+                };
                 e.timer = 2.8;
                 self.spawn(e);
             }
@@ -790,6 +839,16 @@ impl GameState {
                 e.timer > 0.0
             }
             EntKind::Peel | EntKind::Decoy => {
+                if e.vel.len() > 5.0 {
+                    // lobbed forward: skid to a stop
+                    e.pos += e.vel * DT;
+                    e.vel = e.vel * (1.0 - 3.0 * DT);
+                    if tr.dist_at(e.pos) > SHELL_LIMIT {
+                        let n = tr.outward(e.pos);
+                        e.vel = (e.vel - n * (2.0 * e.vel.dot(n))) * 0.4;
+                        e.pos = e.pos - n * 4.0;
+                    }
+                }
                 if let Some(j) = self.contact(e, 12.0) {
                     let k = &mut self.karts[j];
                     if !k.smasher() {
@@ -826,7 +885,7 @@ impl GameState {
                 let want = if homing {
                     tgt.unwrap() - e.pos
                 } else {
-                    tr.pt(run + 9) - e.pos
+                    tr.pt(run + if e.rev { -9 } else { 9 }) - e.pos
                 };
                 let cur = e.vel.y.atan2(e.vel.x);
                 let diff = wrap_angle(want.y.atan2(want.x) - cur);
@@ -974,6 +1033,7 @@ fn drive(
         if racing && inp.drift && k.drift_dir == 0 && inp.steer.abs() > 0.3 && vf > 140.0 {
             k.drift_dir = if inp.steer > 0.0 { 1 } else { -1 };
             k.drift_charge = 0.0;
+            k.drift_t = 0.0;
         }
         if k.drift_dir != 0 && (!inp.drift || vf < 90.0) {
             let c = k.drift_charge;
@@ -994,7 +1054,9 @@ fn drive(
         let eff = if k.drift_dir != 0 {
             let d = k.drift_dir as f32;
             k.drift_charge += DT * if steer * d > 0.3 { 1.5 } else { 1.0 };
-            d * (0.8 + 0.4 * steer * d)
+            k.drift_t += DT;
+            // ease into the slide instead of snapping to full lock
+            d * (0.75 + 0.35 * steer * d) * (k.drift_t / 0.18).min(1.0)
         } else {
             steer
         };
@@ -1018,8 +1080,13 @@ fn drive(
         } else {
             vf -= vf * 0.9 * DT;
         }
-        let grip = if k.drift_dir != 0 { 2.4 } else { 10.0 };
-        vl *= (-grip * DT).exp();
+        let grip = if k.drift_dir != 0 { 5.5 } else { 10.0 };
+        let kept = vl * (-grip * DT).exp();
+        if k.drift_dir != 0 {
+            // a drifting kart carries its speed round the corner instead of scrubbing it off
+            vf += (vl - kept).abs() * 0.6;
+        }
+        vl = kept;
         k.vel = fwd * vf + rgt * vl;
     }
 
@@ -1060,23 +1127,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bots_finish_a_race() {
+    fn bots_finish_a_race_on_every_track() {
+        for t in Track::all() {
+            let mut g = GameState::new(&t);
+            g.laps = 2;
+            g.bots = 7;
+            g.add_human(&t, "Tester");
+            g.karts[0].is_bot = true; // let the autopilot drive it too
+            g.start_race(&t);
+            for _ in 0..(60 * 400) {
+                g.step(&t);
+                if g.phase == Phase::Results {
+                    break;
+                }
+            }
+            assert_eq!(g.phase, Phase::Results, "{}: race never finished; progs: {:?}", t.name, g.karts.iter().map(|k| k.prog).collect::<Vec<_>>());
+            assert!(g.karts.iter().all(|k| k.finished), "{}: unfinished kart", t.name);
+        }
+    }
+
+    #[test]
+    fn results_wait_for_bots_instead_of_dnf() {
         let tr = Track::new();
         let mut g = GameState::new(&tr);
-        g.laps = 2;
-        g.bots = 7;
-        g.add_human(&tr, "Tester");
-        g.karts[0].is_bot = true; // let the autopilot drive it too
+        g.laps = 1;
+        g.bots = 3;
+        g.add_human(&tr, "Human");
         g.start_race(&tr);
-        for _ in 0..(60 * 400) {
+        // human is autopiloted through `finished` once it crosses the line: teleport it there
+        g.karts[0].is_bot = false;
+        for _ in 0..(60 * 5) {
+            g.step(&tr);
+        }
+        let run = tr.n as i32 - 5;
+        g.karts[0].run = run;
+        g.karts[0].pos = tr.pt(run);
+        let t = tr.tangent(run);
+        g.karts[0].heading = t.y.atan2(t.x);
+        g.karts[0].vel = t * 300.0;
+        for _ in 0..600 {
             g.step(&tr);
             if g.phase == Phase::Results {
                 break;
             }
         }
-        assert_eq!(g.phase, Phase::Results, "race never finished; progs: {:?}", g.karts.iter().map(|k| k.prog).collect::<Vec<_>>());
-        assert!(g.karts.iter().all(|k| k.finished));
-        println!("race time {:.1}s", g.timer);
+        assert_eq!(g.phase, Phase::Results);
+        assert!(g.karts.iter().all(|k| k.finished), "nobody should be DNF when only bots were left");
+    }
+
+    #[test]
+    fn thrown_items_go_where_aimed() {
+        let tr = Track::new();
+        let mut g = GameState::new(&tr);
+        g.bots = 0;
+        g.add_human(&tr, "a");
+        g.start_race(&tr);
+        for _ in 0..300 {
+            g.step(&tr);
+        }
+        let fwd = V2::from_angle(g.karts[0].heading);
+        let cases = [
+            (Item::Peel, 1, true),
+            (Item::Peel, 0, false),
+            (Item::Bouncer, 0, true),
+            (Item::Bouncer, -1, false),
+            (Item::Bomb, 0, true),
+            (Item::Bomb, -1, false),
+        ];
+        for (item, aim, ahead) in cases {
+            g.ents.clear();
+            g.karts[0].slots[0] = (item as u8, 1);
+            g.karts[0].input.aim = aim;
+            g.karts[0].input.use_seq = g.karts[0].input.use_seq.wrapping_add(1);
+            let origin = g.karts[0].pos;
+            g.step(&tr);
+            for _ in 0..8 {
+                g.step(&tr);
+            }
+            let e = g.ents.first().unwrap_or_else(|| panic!("{item:?} aim {aim}: nothing spawned; spin {} slots {:?} phase {:?} lastuse {} inp {}", g.karts[0].spin, g.karts[0].slots, g.phase, g.karts[0].last_use, g.karts[0].input.use_seq));
+            let side = (e.pos - g.karts[0].pos).dot(fwd);
+            assert_eq!(side > 0.0, ahead, "{item:?} aim {aim}: rel {side} origin {:?}", origin);
+        }
     }
 
     #[test]
@@ -1122,8 +1253,7 @@ mod tests {
     fn boost_on_pad_gives_a_brief_combo() {
         let tr = Track::new();
         let mut k = Kart::new("a", false);
-        let pad = tr.pad_ranges[0].0 as i32 + 3;
-        let start = pad - 10;
+        let start = tr.locate(tr.pads[0].c, 0).0 - 12;
         k.pos = tr.pt(start);
         k.run = start;
         let t = tr.tangent(start);
